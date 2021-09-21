@@ -1,6 +1,7 @@
-import socket, errno
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
+import urllib.parse
+import socket, errno
 from queue import Queue, Empty
 import cgi
 import ida_idaapi
@@ -8,6 +9,7 @@ import ida_kernwin
 import idaapi
 import idautils
 import idc
+import atexit
 import json
 import re
 import threading
@@ -16,12 +18,16 @@ import traceback
 import itertools
 import urllib.parse as urlparse
 from PyQt5 import QtWidgets
-from superglobals import setglobal, getglobal
+from superglobals import setglobal, getglobal, superglobals
+
 
 API_PREFIX = '/ida/api/v1.0'
 API_PORT = 2000
 API_HOST = '127.0.0.1'
 API_DEBUG = False
+
+# MASTER_HOST = API_HOST
+# MASTER_PORT = 28610 # hash('idarest75') & 0xffff
 
 def asBytes(s):
     if isinstance(s, str):
@@ -83,11 +89,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 print("[get_result] return wrapped_iter")
                 return HTTPRequestHandler.wrapped_iter(value)
         except Empty:
-            value = {'code': 500, 'msg': 'No response: timeout',
-                    "error_trace": traceback.format_exc()}
+            value = {'code': 400, 'msg': 'No response: timeout',
+                    "traceback": traceback.format_exc()}
         except Exception as e:
-            value = {'code': 500, 'msg': 'Unhandled Exception: ({}) {}'.format(type(e), str(e)),
-                    "error_trace": traceback.format_exc()}
+            value = {'code': 400, 'msg': 'Unhandled Exception: ({}) {}'.format(type(e), str(e)),
+                    "traceback": traceback.format_exc()}
         except:
             value = "timeout"
         if API_DEBUG: idc.msg("[get_result] {}: {}\n".format(uid, value))
@@ -174,7 +180,16 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             #  while not HTTPRequestHandler.idarest_queue[uid].empty():
                 #  print("[_serve_route] flushing queue...")
                 #  HTTPRequestHandler.idarest_queue[uid].get()
-            ida_kernwin.execute_sync(lambda: HTTPRequestHandler.set_result(uid, view_function(self, args)), ida_kernwin.MFF_WRITE)
+                #
+
+            def _exec():
+                try:
+                    HTTPRequestHandler.set_result(uid, view_function(self, args))
+                except Exception as e:
+                    HTTPRequestHandler.set_result(uid, e)
+
+            # ida_kernwin.execute_sync(lambda: HTTPRequestHandler.set_result(uid, view_function(self, args)), ida_kernwin.MFF_WRITE)
+            ida_kernwin.execute_sync(_exec, ida_kernwin.MFF_WRITE)
             results = HTTPRequestHandler.get_result(uid)
 
             # these won't run in the main thread, so could cause issues if they try to interact with the idb
@@ -263,11 +278,17 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     'msg'  : 'OK',
                     'data' : it,
                 }
-            if isinstance(response['data'], dict):
-                if 'error' in response['data']:
-                    response['msg'] = 'FAIL'
 
             exception = False
+            if isinstance(response['data'], dict):
+                if 'error' in response['data']:
+                    response['code'] = 400
+                    response['msg'] = response['data']['error']
+                    if 'error_trace' in response['data']:
+                        response['traceback'] = response['data']['error_trace']
+                    response.pop('data')
+                    exception = True
+
         except UnknownApiError as e:
             self.send_error(e.code, e.msg)
             return
@@ -280,8 +301,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         except StopIteration as e:
             response = {'code': 400, 'msg': 'StopIteration: ' + str(e)}
         except Exception as e:
-            response = {'code': 500, 'msg': 'Unhandled Exception: ({}) {}'.format(type(e), str(e)),
-                    "error_trace": traceback.format_exc()}
+            response = {
+                    'code': 400, 
+                    'msg': '{}: {}'.format(str(type(e)).replace("<class '", '').replace("'>", ""), str(e)),
+                    "traceback": traceback.format_exc()
+            }
 
         if exception and iterable:
             iterable = False
@@ -296,6 +320,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
         if iterable:
             self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
@@ -341,10 +366,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _extract_post_map(self):
         content_type, _t = cgi.parse_header(self.headers.get('content-type'))
-        if content_type != 'application/json':
-            raise HTTPRequestError(
-                    'Bad content-type, use application/json',
-                    400)
+        #  if content_type != 'application/json':
+            #  raise HTTPRequestError(
+                    #  'Bad content-type, use application/json',
+                    #  400)
         length = int(self.headers.get('content-length'))
         try:
             return json.loads(self.rfile.read(length))
@@ -363,6 +388,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     "Query param specified multiple times : " + k,
                     400)
             args[k.lower()] = v[0]
+            if API_DEBUG: print('args["{}"]: "{}"'.format(k.lower(), v[0]))
         return args
 
     def _extract_callback(self):
@@ -522,6 +548,29 @@ class IDARequestHandler(HTTPRequestHandler):
         result = paren_multisplit(s, delim, '\'"', '\'"')
         if API_DEBUG: print("[paren_split] in: {}".format(s))
         if API_DEBUG: print("[paren_split] out: {}".format(result))
+
+
+    @staticmethod
+    def _dotted(key):
+        pieces = key.split('.')
+        return pieces
+
+    @staticmethod
+    def _ensure_path(_dict, path):
+        if not path:
+            if API_DEBUG: idc.msg("[_ensure_path] empty path\n")
+            return None
+        for piece in path:
+            try:
+                if piece in _dict:
+                    _dict = _dict[piece]
+            except TypeError:
+                if hasattr(_dict, piece):
+                    _dict = getattr(_dict, piece)
+                else:
+                    return None
+        return _dict
+
 
     @staticmethod
     def _getplus(key):
@@ -826,7 +875,20 @@ class IDARequestHandler(HTTPRequestHandler):
                 return IDARequestHandler.error('missing parameter \'cmd\'')
             cmd = args['cmd']
             if API_DEBUG: idc.msg('cmd: {}\n'.format(cmd))
-            exec(cmd, IDARequestHandler.superglobals())
+            if 'return' not in args and not re.match(r'\s*\S+\s*=', cmd):
+                cmd = '_old_stdout = sys.stdout                  \n' + \
+                      '_old_stderr = sys.stderr                  \n' + \
+                      '_old_help = help                          \n' + \
+                      'help = pydoc.Helper()                     \n' + \
+                      'sys.stdout = sys.stderr = IDARestStdOut() \n' + \
+                      cmd + '                                    \n' + \
+                      '_result = sys.stdout.buffer               \n' + \
+                      'help = _old_help                          \n' + \
+                      'sys.stdout = _old_stdout                  \n' + \
+                      'sys.stderr = _old_stderr                  \n'
+                args['return'] = '_result'
+                
+            exec(cmd, superglobals())
             if 'return' in args:
                 return getglobal(args['return'], None)
         except Exception as e:
@@ -849,6 +911,24 @@ class IDARequestHandler(HTTPRequestHandler):
         except Exception as e:
             return IDARequestHandler.error(e)
 
+class IDARestStdOut:
+    """
+    Dummy file-like class that receives stout and stderr
+    """
+    def __init__(self):
+        self.buffer = ''
+
+    def write(self, text):
+        # NB: in case 'text' is Unicode, msg() will decode it
+        # and call msg() to print it
+        self.buffer += text
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
 """
 Threaded HTTP Server and Worker
 
@@ -869,10 +949,10 @@ class Worker(threading.Thread):
         self.httpd.serve_forever()
 
     def stop(self):
-        idc.msg("httpd shutdown...\n")
         self.httpd.shutdown()
-        idc.msg("httpd server_close...\n")
         self.httpd.server_close()
+        idc.msg("httpd shutdown...\n")
+        idc.msg("httpd server_close...\n")
 
 """
 IDA Pro Plugin Interface
@@ -893,15 +973,16 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
     wanted_hotkey = ""
 
     @staticmethod
-    def test_port(port):
+    def test_bind_port(port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
+                # s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(("127.0.0.1", port))
             except socket.error as e:
                 if e.errno != errno.EADDRINUSE:
                     print(e)
                 else:
-                    print("[idarest_plugin_t::test_port] port in use: {}".format(port))
+                    print("[idarest_plugin_t::test_bind_port] port in use: {}".format(port))
                 return False
         return True
 
@@ -920,7 +1001,7 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
         #  self.ctxs = [new_ctx1, new_ctx2]
         self.worker = None
         for port in range(API_PORT, 65535):
-            if idarest_plugin_t.test_port(port):
+            if idarest_plugin_t.test_bind_port(port):
                 self.port = port
                 break
         self.host = API_HOST
@@ -937,7 +1018,16 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
             return
 
         try:
-            self.worker = Worker(self.host, self.port)
+            worker = Worker(self.host, self.port)
+            self.worker = worker
+
+            def cleanup():
+                if worker and worker.is_alive():
+                    worker.stop()
+                    worker.join()
+
+            atexit.register(cleanup)
+
         except Exception as e:
             idc.msg("[idarest_plugin_t::start] error starting worker : \n" + str(e) + "\n")
             return ida_idaapi.PLUGIN_UNL
@@ -965,7 +1055,8 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
         idc.msg("[idarest_plugin_t::term]\n")
         try:
             self.stop()
-        except:
+        except Exception as e:
+            idc.msg("[idarest_plugin_t::term] {}\n".format(e))
             pass
         #  for ctx in self.ctxs:
             #  ida_kernwin.del_hotkey(ctx)
