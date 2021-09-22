@@ -19,11 +19,12 @@ Examples
 `curl 'localhost:2000/ida/api/v1.0/call?cmd=print_decls&ordinals=1,2,3&flags=0'`
 
 **Evaluate expressions via exec()**
-[![eval demo](https://sfinktah.github.io/idarest75/eval.png)
 [http://127.0.0.1:2000/ida/api/v1.0/eval?cmd=[math.pow(x,2) for x in range(4)]](http://127.0.0.1:2000/ida/api/v1.0/eval?cmd=[math.pow(x,2)%20for%20x%20in%20range(4)])
 ```json
 {"code": 200, "msg": "OK", "data": [0.0, 1.0, 4.0, 9.0]}
 ```
+**Example of embedded /eval/ engine using HTML/JS**
+![eval demo](https://sfinktah.github.io/idarest75/eval.png)
 
 **Return chunked results via thread-safe generators**
 ```py

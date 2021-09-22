@@ -1,14 +1,30 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
+import urllib.request, urllib.error, urllib.parse
+import requests
 import urllib.parse
 import socket, errno
 from queue import Queue, Empty
 import cgi
-import ida_idaapi
-import ida_kernwin
-import idaapi
-import idautils
-import idc
+from code import InteractiveInterpreter
+
+try:
+    import idc
+    import ida_idaapi
+    import ida_kernwin
+    import idaapi
+    import idautils
+    from PyQt5 import QtWidgets
+except:
+    class idc:
+        @staticmethod
+        def msg(s):
+            print(s)
+
+    class ida_idaapi:
+        plugin_t = object
+        PLUGIN_UNL = PLUGIN_KEEP = 0
+
 import atexit
 import json
 import re
@@ -17,22 +33,25 @@ import time
 import traceback
 import itertools
 import urllib.parse as urlparse
-from PyQt5 import QtWidgets
 from superglobals import setglobal, getglobal, superglobals
 
 
 API_PREFIX = '/ida/api/v1.0'
 API_PORT = 2000
 API_HOST = '127.0.0.1'
-API_DEBUG = False
+API_DEBUG = True
 
-# MASTER_HOST = API_HOST
-# MASTER_PORT = 28610 # hash('idarest75') & 0xffff
+MASTER_HOST = API_HOST
+MASTER_PORT = 28612 # hash('idarest75') & 0xffff
 
 def asBytes(s):
     if isinstance(s, str):
         return s.encode('utf-8')
     return s
+
+def asStringRaw(o):
+    return o.decode('raw_unicode_escape') if (isBytes(o) or isByteArray(o)) else o
+
 
 class HTTPRequestError(BaseException):
     def __init__(self, msg, code):
@@ -115,11 +134,13 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             return f
         return decorator
 
-    def add_route(self, route_str, f):
+    @classmethod
+    def add_route(cls, route_str, f):
+        #  print("[HTTPRequestHandler::add_route] cls: {}".format(cls))
         route_path = API_PREFIX + '/' + route_str + '/?'
-        route_pattern = self.build_route_pattern(route_path)
-        self.routes[route_str] = (route_pattern, f)
-        self.docs[route_str] = f.__doc__
+        route_pattern = cls.build_route_pattern(route_path)
+        cls.routes[route_str] = (route_pattern, f)
+        cls.docs[route_str] = f.__doc__
         return f
 
     def remove_route(self, route_str):
@@ -516,15 +537,47 @@ def require_params(*params):
     def decorator(f):
         def require_params_wrapper(self, args):
             for x in params:
-                if x not in args:
+                if ':' not in x and ' ' not in x and x not in args:
                     raise IDARequestError('missing parameter {0}'.format(x), 400)
             return f(self, args)
         require_params_wrapper.__doc__ = f.__doc__
+        require_params_wrapper._params = getattr(f, '_params', [])
+        require_params_wrapper._params.append(params)
         return require_params_wrapper
     return decorator
 
 class IDARequestError(HTTPRequestError):
     pass
+
+class EvalInterpreter(InteractiveInterpreter):
+    def __init__(self, locals=None):
+        super(EvalInterpreter, self).__init__(locals)
+        self.buffer = ''
+
+    def write(self, data):
+        self.buffer += data
+
+    def eval(self, cmd):
+        global help
+        is_help = cmd.startswith('help(')
+        _old_stdout = sys.stdout
+        _old_stderr = sys.stderr
+        if is_help:
+            _old_help = help       
+            help = pydoc.Helper()  
+
+        sys.stdout = sys.stderr = IDARestStdOut()
+        try:
+            r = self.runsource(cmd)
+            result = sys.stdout.buffer + self.buffer
+        finally:
+            sys.stdout = _old_stdout
+            if is_help:
+                help = _old_help
+        if r != False:
+            raise SyntaxError(cmd)
+        return result.rstrip('\n')
+
 
 class IDARequestHandler(HTTPRequestHandler):
     @staticmethod
@@ -608,7 +661,7 @@ class IDARequestHandler(HTTPRequestHandler):
         # No args, Return everything we can meta-wise about the ida session
         # file crcs
         result = {
-                'md5' : idc.GetInputMD5(),
+                'md5' : asStringRaw(idc.GetInputMD5()),
                 'idb_path' : idc.GetIdbPath(),
                 'file_path' : idc.GetInputFilePath(),
                 'ida_dir' : idc.GetIdaDirectory(),
@@ -673,6 +726,7 @@ class IDARequestHandler(HTTPRequestHandler):
 
 
     @HTTPRequestHandler.route('get_type')
+    @require_params('type', 'comma seperated list of types')
     def get_type(self, args):
         """
         get type definition(s)
@@ -771,7 +825,7 @@ class IDARequestHandler(HTTPRequestHandler):
             return m
 
     @HTTPRequestHandler.route('get')
-    @require_params('var')
+    @require_params('var', 'name of variable to retrieve')
     def get_var(self, args):
         """get global variable
 
@@ -801,7 +855,9 @@ class IDARequestHandler(HTTPRequestHandler):
             return IDARequestHandler.error("Unknown Exception")
 
     @HTTPRequestHandler.route('call')
-    @require_params('cmd')
+    @require_params('cmd',             'name of callable')
+    @require_params('args:optional',   'comma seperated list of positional arguments')
+    @require_params('kwargs:optional', 'object of keyword arguments')
     def call(self, args):
         """run callable and return result
 
@@ -854,7 +910,8 @@ class IDARequestHandler(HTTPRequestHandler):
 
     @HTTPRequestHandler.route('eval')
     @HTTPRequestHandler.route('exec')
-    @require_params('cmd')
+    @require_params('cmd',             'string to evaluate')
+    @require_params('return:optional', 'variable to return, else return stdout')
     def eval(self, args):
         """evaluate expression via python exec()
 
@@ -875,27 +932,18 @@ class IDARequestHandler(HTTPRequestHandler):
                 return IDARequestHandler.error('missing parameter \'cmd\'')
             cmd = args['cmd']
             if API_DEBUG: idc.msg('cmd: {}\n'.format(cmd))
-            if 'return' not in args and not re.match(r'\s*\S+\s*=', cmd):
-                cmd = '_old_stdout = sys.stdout                  \n' + \
-                      '_old_stderr = sys.stderr                  \n' + \
-                      '_old_help = help                          \n' + \
-                      'help = pydoc.Helper()                     \n' + \
-                      'sys.stdout = sys.stderr = IDARestStdOut() \n' + \
-                      cmd + '                                    \n' + \
-                      '_result = sys.stdout.buffer               \n' + \
-                      'help = _old_help                          \n' + \
-                      'sys.stdout = _old_stdout                  \n' + \
-                      'sys.stderr = _old_stderr                  \n'
-                args['return'] = '_result'
-                
-            exec(cmd, superglobals())
+            i = EvalInterpreter(superglobals())
+            _result = i.eval(cmd)
+
             if 'return' in args:
                 return getglobal(args['return'], None)
+            else:
+                return _result
         except Exception as e:
             return IDARequestHandler.error(e)
 
     @HTTPRequestHandler.route('cli')
-    @require_params('cmd')
+    @require_params('cmd', 'string to evaluate')
     def cli(self, args):
         """fake input to CLI
 
@@ -915,8 +963,10 @@ class IDARestStdOut:
     """
     Dummy file-like class that receives stout and stderr
     """
+    buffer = ''
     def __init__(self):
-        self.buffer = ''
+        pass
+        #  self.buffer = ''
 
     def write(self, text):
         # NB: in case 'text' is Unicode, msg() will decode it
@@ -944,6 +994,8 @@ class Worker(threading.Thread):
     def __init__(self, host=API_HOST, port=API_PORT):
         threading.Thread.__init__(self)
         self.httpd = ThreadedHTTPServer((host, port), IDARequestHandler)
+        self.host = host
+        self.port = port
 
     def run(self):
         self.httpd.serve_forever()
@@ -1000,6 +1052,7 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
         #  new_ctx2 = ida_kernwin.add_hotkey("Alt-9", lambda *a: self.term())
         #  self.ctxs = [new_ctx1, new_ctx2]
         self.worker = None
+        self.master = None
         for port in range(API_PORT, 65535):
             if idarest_plugin_t.test_bind_port(port):
                 self.port = port
@@ -1021,19 +1074,49 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
             worker = Worker(self.host, self.port)
             self.worker = worker
 
-            def cleanup():
-                if worker and worker.is_alive():
-                    worker.stop()
-                    worker.join()
-
-            atexit.register(cleanup)
+            #  def cleanup():
+                #  if worker and worker.is_alive():
+                    #  idc.msg("[idarest_plugin_t::start::cleanup] stopping..\n")
+                    #  worker.stop()
+                    #  idc.msg("[idarest_plugin_t::start::cleanup] joining..\n")
+                    #  worker.join()
+                    #  idc.msg("[idarest_plugin_t::start::cleanup] stopped\n")
+#  
+            #  atexit.register(cleanup)
 
         except Exception as e:
-            idc.msg("[idarest_plugin_t::start] error starting worker : \n" + str(e) + "\n")
+            idc.msg("[idarest_plugin_t::start] error starting worker: " + e.__class__.__name__ + ": " + str(e) + "\n")
             return ida_idaapi.PLUGIN_UNL
 
         self.worker.start()
         idc.msg("[idarest_plugin_t::start] worker started: port {}\n".format(self.port))
+
+        for port in range(MASTER_PORT, MASTER_PORT + 2):
+            url = 'http://{}:{}{}/register'.format(MASTER_HOST, port, API_PREFIX)
+            idc.msg("[idarest_plugin_t::start] trying to register with master at {}\n".format(url))
+            connect_timeout = 1
+            read_timeout = 1
+            try:
+                p = idc.get_idb_path()
+                idb = os.path.split(os.path.split(p)[0])[1] + '/' + os.path.splitext(os.path.split(os.path.split(p)[1])[1])[0]
+                
+                r = requests.get(
+                        url, 
+                        params={ 
+                            'host': self.host,
+                            'port': self.port,
+                            'idb': idb,
+                        }, 
+                        timeout=(connect_timeout, read_timeout))
+                if r.status_code == 200:
+                    self.master_port = port
+                    idc.msg("[idarest_plugin_t::start] registered\n".format(url))
+                    break
+            except requests.exceptions.ConnectTimeout:
+                pass
+            except requests.exceptions.ConnectionError as e:
+                idc.msg("[idarest_plugin_t::start] error with master: {}: {}\n".format(e.__class__.__name__, str(e)))
+
         return ida_idaapi.PLUGIN_KEEP
 
     def run(self, *args):
@@ -1042,14 +1125,15 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
 
     def stop(self):
         idc.msg("[idarest_plugin_t::stop]\n")
-        if self.worker and not self.worker.is_alive():
+        if not self.worker or not self.worker.is_alive():
             idc.msg("[idarest_plugin_t::stop] worker was not running\n")
             return
-
-        idc.msg("[idarest_plugin_t::stop] stopping..\n")
-        self.worker.stop()
-        self.worker.join()
-        idc.msg("[idarest_plugin_t::stop] stopped\n")
+        else:
+            idc.msg("[idarest_plugin_t::stop] stopping..\n")
+            self.worker.stop()
+            idc.msg("[idarest_plugin_t::stop] joining..\n")
+            self.worker.join()
+            idc.msg("[idarest_plugin_t::stop] stopped\n")
 
     def term(self):
         idc.msg("[idarest_plugin_t::term]\n")
@@ -1066,7 +1150,7 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
         return self.worker.httpd.RequestHandlerClass
 
     def add_route(self, route_pattern, f):
-        self.handler.add_route(self.handler, route_pattern, f)
+        self.handler.add_route(route_pattern, f)
 
     def remove_route(self, route_pattern):
         self.handler.remove_route(self.handler, route_pattern)
@@ -1092,6 +1176,8 @@ def idarest_main(port):
     if idarest_main.instance is None:
         idarest_main.instance = ir = idarest_plugin_t()
         ir.init()
+    else:
+        idc.msg('idarest_main.instance was not None!!!!!\n')
 
     ### example dnamic routes
     def name_generator(self, args):
@@ -1159,4 +1245,3 @@ if not hasattr(idarest_main, 'instance'):
 
 if __name__ == "__main__":
     ir = idarest_main(API_PORT)
-
