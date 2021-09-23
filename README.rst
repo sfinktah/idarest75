@@ -1,7 +1,7 @@
 idarest
 
 Using idarest
-============
+========================
 
 .. code-block:: python
 
