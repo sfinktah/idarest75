@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-VERSION="0.0.23"
+VERSION="0.0.24"
 with open("README.rst", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 setup(
@@ -20,6 +20,6 @@ setup(
     ],
     python_requires=">=3.7",
     packages=find_packages(),
-    install_requires=['superglobals>=0.0.15'],
+    install_requires=['superglobals>=0.0.15', 'split-paren'],
 )
 

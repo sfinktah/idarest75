@@ -1,8 +1,15 @@
 idarest75
-========
+=========
 A not-so-simple REST-like API for intermediate interoperability with IDA Pro >= 7.5 with full threading support.
 
 Based on https://github.com/dshikashio/idarest/
+
+Uber-Features
+=============
+**Automatically aggregate large numbers of ida sessions and perform bulk queries**
+![eval demo](https://sfinktah.github.io/idarest75/evalm.png)
+
+**`idarest_master` overwatch is automatically launched by any of your IDA sessions, and keeps tracks of which sessions are live**
 
 Examples
 ========
@@ -85,17 +92,20 @@ ir.add_route('echo', lambda o, *a: {'args': a})
 Requirements
 ------------
 ```py
-pip install superglobals split-paren
+pip install --upgrade idarest superglobals split-paren
 ```
 
 Installing and Running
 ----------------------
-You can simply load idarest.py and have it ready to go, or if you must: copy idarest.py to IDA Pro's plugin directory.
+Save/copy `idarest_plugin.py` to your IDA pugin directory.
 
 ***Note about plugin usage***
-To dynamically add new routes, you will have to obtain an instance of the plugin:
+
+To add dynamic routes to any scripts:
+
 ```py
-ir = sys.modules['__plugins__idarest'].instance
+from idarest.idarest import ir
+id.add_route(name, callable)
 ```
 
 Configuration
@@ -117,8 +127,7 @@ HTTP status returned will always be 200, 400, 404, or 500.
 400 occurs for
 * Bad POST arguments (must be application/json or malformed JSON)
 * Bad QUERY arguments (specifying the same var multiple times)
-
-500 occurs for Exceptions
+* Exceptions
 
 200 will be returned for everything else, including *invalid* API argument
 values and some exceptions.
