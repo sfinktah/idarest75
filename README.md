@@ -95,7 +95,7 @@ You can simply load idarest.py and have it ready to go, or if you must: copy ida
 ***Note about plugin usage***
 To dynamically add new routes, you will have to obtain an instance of the plugin:
 ```py
-ir = sys.modules['__plugins__idarest'].ir
+ir = sys.modules['__plugins__idarest'].instance
 ```
 
 Configuration
