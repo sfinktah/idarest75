@@ -85,6 +85,9 @@ ir.add_route('sleep', sleeping_queue_test)
 
 **Define new commands on demand**
 ```py
+from idarest.idarest import get_ir()
+
+ir = get_ir()
 ir.add_route('ea', lambda o, *a: idc.here())    
 ir.add_route('echo', lambda o, *a: {'args': a}) 
 ```
@@ -92,7 +95,7 @@ ir.add_route('echo', lambda o, *a: {'args': a})
 Requirements
 ------------
 ```py
-pip install --upgrade idarest superglobals split-paren
+pip install --upgrade idarest
 ```
 
 Installing and Running
@@ -104,7 +107,9 @@ Save/copy `idarest_plugin.py` to your IDA pugin directory.
 To add dynamic routes to any scripts:
 
 ```py
-from idarest.idarest import ir
+from idarest.idarest import get_ir()
+
+ir = get_ir()
 id.add_route(name, callable)
 ```
 

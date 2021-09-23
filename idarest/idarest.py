@@ -58,6 +58,12 @@ MASTER_PORT = 28612 # hash('idarest75') & 0xffff
 
 #  CFG_FILE = os.path.join(idaapi.get_user_idadir(), "idarest.cfg")
 
+def static_vars(**kwargs):
+    def decorate(func):
+        for k in kwargs:
+            setattr(func, k, kwargs[k])
+        return func
+    return decorate
 
 def _classname(instance):
     return getattr(getattr(instance, '__class__', object), '__name__', '')
@@ -84,6 +90,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     docs = {}
     prefns = {}
     postfns = {}
+    idarest_queue = [Queue() for x in range(11)]
     uid_iterator = itertools.count()
 
     @property
@@ -1084,6 +1091,7 @@ Define an IDA Python plugin required class and function.
 # properly. 
 MENU_PATH = 'Edit/Other'
 class idarest_plugin_t(ida_idaapi.plugin_t):
+    count = 0
     flags = ida_idaapi.PLUGIN_UNL
     comment = "Interface to IDA Rest API"
     help = "IDA Rest API for basic RE tool interoperability"
@@ -1123,16 +1131,19 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
                 if e.errno != errno.EADDRINUSE:
                     if API_DEBUG: idc.msg(e)
                 else:
-                    if API_DEBUG: idc.msg("[idarest_plugin_t::test_bind_port] port in use: {}".format(port))
+                    if API_DEBUG: idc.msg("[idarest_plugin_t::test_bind_port] port in use: {}\n".format(port))
                 return False
         return True
 
     def init(self):
+        if idarest_plugin_t.count:
+            return ida_idaapi.PLUGIN_KEEP
+        idarest_plugin_t.count += 1
         if API_INFO: idc.msg("[idarest_plugin_t::init]\n")
         super(idarest_plugin_t, self).__init__()
 
         # 10 queues for standard operation, 1 queue for iter/generator usage
-        HTTPRequestHandler.idarest_queue = [Queue() for x in range(11)]
+        
         self.state = None
         # I replaced the previous menu contexts with hotkey contexts, but then
         # decided they were pretty useless
@@ -1160,7 +1171,7 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
         if API_INFO: idc.msg("[idarest_plugin_t::start]\n")
         if self.worker and self.worker.is_alive():
             if API_INFO: idc.msg("[idarest_plugin_t::start] already running\n")
-            return
+            return ida_idaapi.PLUGIN_SKIP
 
         worker = Worker(self.host, self.port)
         self.worker = worker
@@ -1221,6 +1232,10 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
             if API_INFO: idc.msg("[idarest_plugin_t::stop] stopped\n")
         idarest_plugin_t.register(self.host, self.port, unregister=True)
         idarest_main.instance = None
+        if 'ir' in globals():
+            globals().pop('ir')
+        if idarest_plugin_t.count > 0:
+            idarest_plugin_t.count -= 1
 
 
     def term(self):
@@ -1302,24 +1317,22 @@ class idarest_plugin_t(ida_idaapi.plugin_t):
 # >>> ir = sys.modules['__plugins__idarest'].instance
 # >>> ir.add_route(...)
 def PLUGIN_ENTRY():
-    globals()['instance'] = idarest_plugin_t()
+    globals()['instance'] = idarest_main(API_PORT) # idarest_plugin_t()
     return globals()['instance']
 
 def idarest_main(port=API_PORT):
-    # terminate any existing instance so we can re-use the port
-    getglobal
-    if 'ir' in globals() and str(type(globals().get('ir'))).find('idarest_plugin_t') > -1:
-        globals()['ir'].term()
-
     # pretend to be a plugin
     if idarest_main.instance is None:
         idarest_main.instance = ir = idarest_plugin_t()
+        idarest_main.instances.append(ir)
         ir.init()
+        #  globals()['ir'] = ir
         #  def cleanup():
             #  ir.term()
         #  atexit.register(cleanup)
     else:
-        if API_INFO: idc.msg('idarest_main.instance was not None!!!!!\n')
+        idc.msg('idarest_main.instance was not None!!!!!\n')
+        return idarest_main.instance
 
     ### example dnamic routes
     def name_generator(self, args):
@@ -1384,6 +1397,7 @@ def idarest_main(port=API_PORT):
 
 if not hasattr(idarest_main, 'instance'):
     idarest_main.instance = None
+    idarest_main.instances = []
 
 if API_DEBUG:
     print("[idarest]: __name__: ", __name__)
@@ -1434,56 +1448,71 @@ def is_plugin():
     return False
 
 # find existing instance of idarest (unless we're loading as an ida plugin)
-ir = None
-if not is_plugin():
+def get_ir():
+    if API_DEBUG: idc.msg("attempting to find existing idarest instance...\n")
     # check if idarest is loaded as a plugin
+    ir = None
+    if API_DEBUG: idc.msg('sys.modules.__plugins__\n')
+    for k in [x for x in sys.modules if x.startswith('__plugins__')]:
+        if API_DEBUG: idc.msg('    ' + k + '\n')
+    if API_DEBUG: idc.msg('sys.modules.__plugins__ via getglobal\n')
+    for k in [x for x in getglobal('sys.modules') if x.startswith('__plugins__')]:
+        if API_DEBUG: idc.msg('    ' + k + '\n')
     ir = ir or getglobal('sys.modules.__plugins__idarest_plugin.instance', None)
     if ir:
-        if API_INFO: print("got referest to idarest from sys.modules.__plugins__idarest_plugin.instance")
-    # check if idarest is loaded as a module
+        if API_INFO: idc.msg("got reference to idarest from sys.modules.__plugins__idarest_plugin.instance\n")
     else:
-        ir = ir or getglobal('sys.modules.idarest.instance', None)
+        ir = ir or getglobal('sys.modules.__plugins__idarest.instance', None)
         if ir:
-            if API_INFO: print("got referest to idarest from sys.modules.idarest.instance")
+            if API_INFO: idc.msg("got reference to idarest from sys.modules.__plugins__idarest.instance\n")
+        # check if idarest is loaded as a module
         else:
-            # check if idarest is loaded in global context
-            ir = ir or getglobal('idarest_main.instance', None)
+            ir = ir or getglobal('sys.modules.idarest.instance', None)
             if ir:
-                if API_INFO: print("got referest to idarest from idarest_main.instance (will restart)")
-                # else start a new idarest instance
-                if ir and _load_method == "direct":
-                    ir.term()
-                    ir = None
+                if API_INFO: idc.msg("got reference to idarest from sys.modules.idarest.instance\n")
+            else:
+                # check if idarest is loaded in global context
+                ir = ir or getglobal('idarest_main.instance', None)
+                if ir:
+                    if API_INFO: idc.msg("got reference to idarest from idarest_main.instance (will restart)\n")
+                    # else start a new idarest instance
+                    if ir and _load_method == "direct":
+                        ir.term()
+                        ir = None
 
     if not ir:
-        if API_INFO: print("restarting")
+        if API_INFO: idc.msg("restarting\n")
         ir = ir or idarest_main(API_PORT)
 
-def unload_idarest():
-    # gc.get_referrers(getglobal('sys.modules.__plugins__idarest_plugin.instance'))
-    # l = ida_loader.load_plugin('e:/git/ida/idarest_plugin.py')
-    # ida_loader.run_plugin(l)
-    import gc
-    ir = getglobal('sys.modules.__plugins__idarest_plugin.instance') or getglobal('sys.modules.idarest.instance') or getglobal('idarest_main.instance')
-    if ir:
-        for o in gc.get_referrers(ir):
-            if isinstance(o, dict):
-                for k in o.keys():
-                    if o[k] == ir:
-                        print("deleting key {}".format(k))
-                        o.pop(k)
-            else:
-                for k in dir(o):
-                    if getattr(o, k, None) == ir:
-                        print("deleting attribute {}".format(k))
-                        delattr(o, k)
+    return ir
 
-    removeglobal('sys.modules.__plugins__idarest_plugin.instance')
-    removeglobal('sys.modules.idarest.instance')
-    removeglobal('idarest_main.instance')
+def unload_idarest():
+    l = ida_loader.load_plugin('e:/git/ida/idarest_plugin.py')
+    ida_loader.run_plugin(l, 0)
     unload('idarest')
-    unload('__plugins__idarest')
-    removeglobal('ir')
+    l = ida_loader.load_plugin('e:/git/ida/idarest_plugin.py')
+
+    #    import gc
+    #    ir = getglobal('sys.modules.__plugins__idarest_plugin.instance') or getglobal('sys.modules.idarest.instance') or getglobal('idarest_main.instance')
+    #    if ir:
+    #        for o in gc.get_referrers(ir):
+    #            if isinstance(o, dict):
+    #                for k in o.keys():
+    #                    if o[k] == ir:
+    #                        print("deleting key {}".format(k))
+    #                        o.pop(k)
+    #            else:
+    #                for k in dir(o):
+    #                    if getattr(o, k, None) == ir:
+    #                        print("deleting attribute {}".format(k))
+    #                        delattr(o, k)
+    #
+    #    removeglobal('sys.modules.__plugins__idarest_plugin.instance')
+    #    removeglobal('sys.modules.idarest.instance')
+    #    removeglobal('idarest_main.instance')
+    #    unload('idarest')
+    #    unload('__plugins__idarest')
+    #    removeglobal('ir')
 
 #  def cleanup():
     #  print("**atexit** cleanup2")
