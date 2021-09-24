@@ -1,5 +1,5 @@
-idarest75
-=========
+# idarest75
+
 A not-so-simple REST-like API for intermediate interoperability with IDA Pro >= 7.5 with full threading support.
 
 Based on https://github.com/dshikashio/idarest/
@@ -9,7 +9,12 @@ Uber-Features
 **Automatically aggregate large numbers of ida sessions and perform bulk queries**
 ![eval demo](https://sfinktah.github.io/idarest75/evalm.png)
 
-**`idarest_master` overwatch is automatically launched by any of your IDA sessions, and keeps tracks of which sessions are live**
+There is a copy of the above demo in the `html/` folder.
+
+Overwatch
+=========
+
+`idarest_master` overwatch is automatically launched by your IDA sessions, and keeps tracks of which sessions are live. It uses the same protocol as idarest, and a list of hosts can be queries via http://127.0.0.1:28612/ida/api/v1.0/show
 
 Examples
 ========
@@ -100,11 +105,11 @@ pip install --upgrade idarest
 
 Installing and Running
 ----------------------
-Save/copy `idarest_plugin.py` to your IDA pugin directory.
+Save/copy `idarest_plugin.py` to your IDA pugin directory.  Note: this plugin is under active development and not everything may work as advertised, and not all features are necessarily listed here.
 
-***Note about plugin usage***
+***Note about plugin usage and user scripts***
 
-To add dynamic routes to any scripts:
+You can add dynamic routes in any script. Simply import `get_ir()` which when called will return an instance to the already loaded plugin's routing list, or will create a new idarest thread if none exists.
 
 ```py
 from idarest.idarest import get_ir()
@@ -115,7 +120,23 @@ id.add_route(name, callable)
 
 Configuration
 -------------
-Change the default port (2000) and host (127.0.0.1) in idarest.py
+Configuration is performed on both a global `%APPDATA%\Hex-Rays\IDA Pro\idarest.cfg` and per-project level `%IDB_DIR/idarest.cfg`
+The following defaults will be written to `idarest.cfg` in your IDA configuration directory upon first execution.
+
+Note: the specified `api_port` number will be incremented until a free port is found.
+```json
+{   "api_host": "127.0.0.1",
+    "api_port": 2000,
+    "master_host": "127.0.0.1",
+    "master_port": 28612,
+    "api_prefix": "/ida/api/v1.0",
+    "api_debug": true,
+    "api_info": true,
+    "master_debug": true,
+    "master_info": true,
+    "client_debug": true,
+    "client_info": true }
+```
 
 Conventions
 -----------
@@ -123,6 +144,16 @@ Conventions
 All APIs can be accessed with either GET or POST requests.  Arguments in GET
 requests are passed as URL parameters.  Arguments in POST requests are passed as
 JSON.
+
+There is a simple client library included which interfaces with the master controller to determine what sessions are live, and then queries each in serial (excepting your own session, which would cause a deadlock).
+
+```py
+from idarest.idarest_client import IdaRestClient
+ic = IdaRestClient()
+ic.get_json('eval', cmd='idc.here()')
+```
+
+Results will be returned as a dict, with the key being the path of the idb and the value holding the result.
 
 ### Status and Errors
 HTTP status returned will always be 200, 400, 404, or 500.

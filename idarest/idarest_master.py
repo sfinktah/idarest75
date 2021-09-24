@@ -1,9 +1,14 @@
 import socket
-API_DEBUG = False
-API_INFO = False
-API_PREFIX = '/ida/api/v1.0'
-MASTER_HOST = "127.0.0.1"
-MASTER_PORT = 28612 # hash('idarest75') & 0xffff
+try:
+    from .idarest_mixins import IdaRestConfiguration
+except:
+    from idarest_mixins import IdaRestConfiguration
+
+#  idarest_master_plugin_t.config['master_debug'] = False
+#  idarest_master_plugin_t.config['master_info'] = False
+#  idarest_master_plugin_t.config['api_prefix'] = '/ida/api/v1.0'
+#  idarest_master_plugin_t.config['master_host'] = "127.0.0.1"
+#  idarest_master_plugin_t.config['master_port'] = 28612 # hash('idarest75') & 0xffff
 MENU_PATH = 'Edit/Other'
 
 try:
@@ -17,13 +22,13 @@ except:
     class idc:
         @staticmethod
         def msg(s):
-            if API_DEBUG: print(s)
+            if idarest_master_plugin_t.config['master_debug']: print(s)
 
     class ida_idaapi:
         plugin_t = object
         PLUGIN_SKIP = PLUGIN_UNL = PLUGIN_KEEP = 0
 
-class idarest_master_plugin_t(ida_idaapi.plugin_t):
+class idarest_master_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
     flags = ida_idaapi.PLUGIN_UNL
     comment = "IDA Rest API Master Controller"
     help = "Keeps track of idarest75 clients"
@@ -32,11 +37,12 @@ class idarest_master_plugin_t(ida_idaapi.plugin_t):
 
     def init(self):
         super(idarest_master_plugin_t, self).__init__()
-        if API_INFO: print("[idarest_master_plugin_t::init]")
+        self.load_configuration()
+        if idarest_master_plugin_t.config['master_info']: print("[idarest_master_plugin_t::init]")
         self.master = None
 
-        if not idarest_master_plugin_t.test_bind_port(MASTER_PORT):
-            if API_INFO: print("[idarest_master_plugin_t::init] skipping (port is already bound)")
+        if not idarest_master_plugin_t.test_bind_port(idarest_master_plugin_t.config['master_port']):
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master_plugin_t::init] skipping (port is already bound)")
             return idaapi.PLUGIN_SKIP
 
         self.master = idarest_master()
@@ -56,7 +62,7 @@ class idarest_master_plugin_t(ida_idaapi.plugin_t):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 # s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((MASTER_HOST, port))
+                s.bind((idarest_master_plugin_t.config['master_host'], port))
             except socket.error as e:
                 return False
         return True
@@ -91,7 +97,7 @@ def idarest_master():
             host, port = args['host'], args['port']
             key = host + ':' + port
             if key in self.hosts:
-                if API_DEBUG: print("[idarest_master::Handler::register] replacing existing host {}".format(key))
+                if idarest_master_plugin_t.config['master_debug']: print("[idarest_master::Handler::register] replacing existing host {}".format(key))
             self.hosts[key] = value = dict({
                     'host': args['host'],
                     'port': args['port'],
@@ -105,7 +111,7 @@ def idarest_master():
             host, port = args['host'], args['port']
             key = host + ':' + port
             if key in self.hosts:
-                if API_DEBUG: print("removing existing host {}".format(key))
+                if idarest_master_plugin_t.config['master_debug']: print("removing existing host {}".format(key))
                 value = self.hosts.pop(key)
             else:
                 value = dict({
@@ -124,16 +130,16 @@ def idarest_master():
             start = time.time()
             if readonly:
                 for k, host in hosts.items():
-                    if API_DEBUG: print("alive: {}".format(start - host['alive']))
+                    if idarest_master_plugin_t.config['master_debug']: print("alive: {}".format(start - host['alive']))
                     if start - host['alive'] < 90:
-                        results[host['idb']] = 'http://{}:{}{}/'.format(host['host'], host['port'], API_PREFIX)
+                        results[host['idb']] = 'http://{}:{}{}/'.format(host['host'], host['port'], idarest_master_plugin_t.config['api_prefix'])
                     else:
                         results[host['idb']] = start - host['alive']
                 return results
 
             for k, host in hosts.items():
                 start = time.time()
-                url = 'http://{}:{}{}/echo'.format(host['host'], host['port'], API_PREFIX)
+                url = 'http://{}:{}{}/echo'.format(host['host'], host['port'], idarest_master_plugin_t.config['api_prefix'])
                 try:
                     connect_timeout = 10
                     read_timeout = 10
@@ -165,7 +171,7 @@ def idarest_master():
                         "Query param specified multiple times : " + k,
                         400)
                 args[k.lower()] = v[0]
-                if API_DEBUG: print('args["{}"]: "{}"'.format(k.lower(), v[0]))
+                if idarest_master_plugin_t.config['master_debug']: print('args["{}"]: "{}"'.format(k.lower(), v[0]))
             return args
 
         def send_origin_headers(self):
@@ -207,30 +213,30 @@ def idarest_master():
             self._stop_event = threading.Event()
 
         def run(self):
-            if API_INFO: print("[idarest_master::Timer::run] started")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::run] started")
             while True:
                 if self._stop_event.wait(60.0):
                     break
                 result = Handler.get_json(Handler.hosts, {'ping': time.time()})
-                if API_DEBUG: print("[idarest_master::Timer::run] {}".format(result))
-            if API_INFO: print("[idarest_master::Timer::run] stopped")
+                if idarest_master_plugin_t.config['master_debug']: print("[idarest_master::Timer::run] {}".format(result))
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::run] stopped")
 
             #  if not self.running:
                 #  self.running = True
                 #  while self.running:
                     #  time.sleep(60.0 - ((time.time() - self.starttime) % 60.0))
-                    #  if API_DEBUG: print(Handler.get_json(Handler.hosts, {'ping': time.time()}))
-                #  if API_INFO: print("[idarest_master::Timer::run] stopped")
+                    #  if idarest_master_plugin_t.config['master_debug']: print(Handler.get_json(Handler.hosts, {'ping': time.time()}))
+                #  if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::run] stopped")
 
         def stop(self):
             if self.is_alive():
                 if self.stopped():
-                    if API_INFO: print("[idarest_master::Timer::stop] already stopping...")
+                    if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::stop] already stopping...")
                 else:
-                    if API_INFO: print("[idarest_master::Timer::stop] stopping...")
+                    if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::stop] stopping...")
                     self._stop_event.set()
             else:
-                if API_INFO: print("[idarest_master::Timer::stop] not running")
+                if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Timer::stop] not running")
 
         def stopped(self):
             return self._stop_event.is_set()
@@ -243,16 +249,16 @@ def idarest_master():
             self.port = port
 
         def run(self):
-            if API_INFO: print("[idarest_master::Worker::run] master httpd starting...")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Worker::run] master httpd starting...")
             self.httpd.serve_forever()
-            if API_INFO: print("[idarest_master::Worker::run] master httpd started (well stopped now, i guess)")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Worker::run] master httpd started (well stopped now, i guess)")
 
         def stop(self):
-            if API_INFO: print("[idarest_master::Worker::stop] master httpd shutdown...")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Worker::stop] master httpd shutdown...")
             self.httpd.shutdown()
-            if API_INFO: print("[idarest_master::Worker::stop] master httpd server_close...")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Worker::stop] master httpd server_close...")
             self.httpd.server_close()
-            if API_INFO: print("[idarest_master::Worker::stop] master httpd stopped")
+            if idarest_master_plugin_t.config['master_info']: print("[idarest_master::Worker::stop] master httpd stopped")
 
     class Master:
         def __init__(self):
@@ -266,7 +272,7 @@ def idarest_master():
             self.test_worker.stop()
 
     def main():
-        if API_INFO: print("[idarest_master::main] starting master")
+        if idarest_master_plugin_t.config['master_info']: print("[idarest_master::main] starting master")
         master = Master()
         #  main.master = master
         return master
