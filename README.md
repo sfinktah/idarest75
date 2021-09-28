@@ -35,6 +35,10 @@ Examples
 ```json
 {"code": 200, "msg": "OK", "data": [0.0, 1.0, 4.0, 9.0]}
 ```
+
+**Evaluate expressions via exec() and return stdout via chunked queue**
+[http://127.0.0.1:2000/ida/api/v1.0/evalq?cmd=[math.pow(x,2) for x in range(4)]](http://127.0.0.1:2000/ida/api/v1.0/evalq?cmd=[math.pow(x,2)%20for%20x%20in%20range(4)])
+
 **Example of embedded /eval/ engine using HTML/JS**
 ![eval demo](https://sfinktah.github.io/idarest75/eval.png)
 

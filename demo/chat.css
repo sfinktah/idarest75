@@ -67,3 +67,16 @@ div#inbox > div.message pre {
     margin-top: 0.3em;
     margin-left: 5px;
 }
+
+.response.stderr {
+    color: darkred;
+}
+
+.response.stdout {
+    color: initial;
+}
+
+
+.response.buffer {
+    color: green;
+}

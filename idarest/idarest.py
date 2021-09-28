@@ -23,9 +23,9 @@ from superglobals import setglobal, getglobal, superglobals
 from split_paren import paren_multisplit
 
 try:
-    from .idarest_mixins import IdaRestConfiguration
+    from .idarest_mixins import IdaRestConfiguration, BorrowStdOut
 except:
-    from idarest_mixins import IdaRestConfiguration
+    from idarest_mixins import IdaRestConfiguration, BorrowStdOut
 
 # for testing outside ida
 try:
@@ -35,7 +35,9 @@ try:
     import ida_loader
     import idaapi
     import idautils
-    from PyQt5 import QtWidgets
+    import ida_pro
+    from PyQt5 import QtWidgets, QtCore
+    delayed_exec_timer = QtCore.QTimer()
 except:
     class idc:
         @staticmethod
@@ -68,6 +70,14 @@ def _asBytes(s):
 
 def _asStringRaw(o):
     return o.decode('raw_unicode_escape') if (isBytes(o) or isByteArray(o)) else o
+
+def _execute_sync(cmd, *args):
+    if ida_pro.is_main_thread():
+        return cmd()
+    request = ida_kernwin.execute_sync(cmd, ida_kernwin.MFF_WRITE)
+    #  request = ida_kernwin.execute_sync(cmd, ida_kernwin.MFF_NOWAIT)
+    #  print("[_execute_sync] request: {}".format(request))
+    #  HTTPRequestHandler.delayed_call(lambda: ida_kernwin.cancel_exec_request(request))
 
 """
 IDA Pro Plugin Interface
@@ -250,7 +260,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
             if not unregister:
                 if e.__class__.__name__ in ('ConnectTimeout', 'ConnectionError'):
                     if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::register] launching new master\n")
-                    ida_kernwin.execute_sync(lambda: ida_loader.load_plugin(master_plugin), ida_kernwin.MFF_WRITE)
+                    _execute_sync(lambda: ida_loader.load_plugin(master_plugin), ida_kernwin.MFF_WRITE)
                 else:
                     if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::register] exception not of a type to trigger loading new master\n")
 
@@ -260,7 +270,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
                 idc.msg("[idarest_plugin_t::register] failed to connect to master: {}: {}\n".format(e.__class__.__name__, str(e)))
             if not unregister:
                 if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::register] launching new master\n")
-                ida_kernwin.execute_sync(lambda: ida_loader.load_plugin(master_plugin), ida_kernwin.MFF_WRITE)
+                _execute_sync(lambda: ida_loader.load_plugin(master_plugin), ida_kernwin.MFF_WRITE)
         # ConnectionAbortedError
             if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::register] failed to connect to master: {}: {}\n".format(e.__class__.__name__, str(e)))
 
@@ -324,7 +334,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def wrapped_iter(value):
         while True:
-            ida_kernwin.execute_sync(lambda: HTTPRequestHandler.synced_next(value), ida_kernwin.MFF_WRITE)
+            _execute_sync(lambda: HTTPRequestHandler.synced_next(value), ida_kernwin.MFF_WRITE)
             yield HTTPRequestHandler.get_result(10)
         yield None
 
@@ -416,6 +426,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def _write(self, s):
         self.wfile.write(_asBytes(s))
 
+    def _write_chunk(self, r):
+        l = len(r)
+        self._write('{:X}\r\n{}\r\n'.format(l, r))
+
+
     def _serve_route(self, args):
         path = urlparse.urlparse(self.path).path
         route_match = self._get_route_match(path)
@@ -438,7 +453,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     HTTPRequestHandler.set_result(uid, e)
 
             # ida_kernwin.execute_sync(lambda: HTTPRequestHandler.set_result(uid, view_function(self, args)), ida_kernwin.MFF_WRITE)
-            ida_kernwin.execute_sync(_exec, ida_kernwin.MFF_WRITE)
+            _execute_sync(_exec, ida_kernwin.MFF_WRITE)
             results = HTTPRequestHandler.get_result(uid)
 
             # these won't run in the main thread, so could cause issues if they try to interact with the idb
@@ -451,10 +466,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _serve_queue(self, q):
         response = {
-            'code' : 200,
-            'msg'  : 'OK',
-            'queue' : 'start',
-            'data' : 'queue',
+            'code':  200,
+            'msg':   'OK',
+            'queue': 'start',
+            'data':  'queue',
         }
 
         jsonp_callback = self._extract_callback()
@@ -472,13 +487,12 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                r = response_fmt.format(json.dumps(response))
-                l = len(r)
-                self._write('{:X}\r\n{}\r\n'.format(l, r))
+                self._write_chunk(response_fmt.format(json.dumps(response)))
 
-                if idarest_plugin_t.config['api_debug']: idc.msg("wrote: {}".format(r))
-                data = q.get(timeout=1)
+                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}".format(response))
+                data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout')
                 if data is None:
+                    if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None")
                     break
                 response = {
                     'code' : 200,
@@ -489,7 +503,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 if isinstance(response['data'], dict):
                     if 'error' in response['data']:
                         response['msg'] = 'FAIL'
-        except Exception:
+        except Empty:
             pass
 
         response = {
@@ -498,71 +512,21 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             'queue' : 'stop',
             'data' : None,
         }
-        r = response_fmt.format(json.dumps(response))
-        l = len(r)
-        self._write('{:X}\r\n{}\r\n'.format(l, r))
-        self._write('0\r\n\r\n')
+        self._write_chunk(response_fmt.format(json.dumps(response)))
+        self._write_chunk('')
+        # self._write('0\r\n\r\n')
 
-    def send_origin_headers(self):
-        if self.headers.get('Origin', '') == 'null':
-            self.send_header('Access-Control-Allow-Origin', self.headers.get('Origin'))
-        self.send_header('Vary', 'Origin')
-
-    def _serve(self, args):
-        iterable = False
+    def _serve_generator(self, it):
+        iterable = True
         exception = True
-        try:
-            it = self._serve_route(args)
-            # it = sleeping_generator_test({}, {})
-            if str(type(it)) == "<class 'generator'>":
-                iterable = True
-                response = {
-                    'code' : 200,
-                    'msg'  : 'OK',
-                    'iterable' : 'start',
-                    'data' : 'iterable',
-                }
-            elif str(type(it)) == "<class 'queue.Queue'>":
-                if idarest_plugin_t.config['api_debug']: print("[_serve] Queue!")
-                queue = True
-                return self._serve_queue(it)
-            else:
-                response = {
-                    'code' : 200,
-                    'msg'  : 'OK',
-                    'data' : it,
-                }
+        queue = True
 
-            exception = False
-            if isinstance(response['data'], dict):
-                if 'error' in response['data']:
-                    response['code'] = 400
-                    response['msg'] = response['data']['error']
-                    if 'error_trace' in response['data']:
-                        response['traceback'] = response['data']['error_trace']
-                    response.pop('data')
-                    exception = True
-
-        except UnknownApiError as e:
-            self.send_error(e.code, e.msg)
-            return
-        except HTTPRequestError as e:
-            response = {'code': e.code, 'msg' : e.msg}
-        except ValueError as e:
-            response = {'code': 400, 'msg': 'ValueError: ' + str(e)}
-        except KeyError as e:
-            response = {'code': 400, 'msg': 'KeyError: ' + str(e)}
-        except StopIteration as e:
-            response = {'code': 400, 'msg': 'StopIteration: ' + str(e)}
-        except Exception as e:
-            response = {
-                    'code': 400, 
-                    'msg': '{}: {}'.format(_classname(e), str(e)),
-                    "traceback": traceback.format_exc()
-            }
-
-        if exception and iterable:
-            iterable = False
+        response = {
+            'code' : 200,
+            'msg'  : 'OK',
+            'iterable' : 'start',
+            'data' : 'iterable',
+        }
 
         jsonp_callback = self._extract_callback()
         if jsonp_callback:
@@ -579,17 +543,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
 
-        if not iterable:
-            self._write(response_fmt.format(json.dumps(response)))
-            return
-
         try:
             while True:
-                r = response_fmt.format(json.dumps(response))
-                l = len(r)
-                self._write('{:X}\r\n{}\r\n'.format(l, r))
+                self._write_chunk(response_fmt.format(json.dumps(response)))
 
-                if idarest_plugin_t.config['api_debug']: idc.msg("wrote: {}".format(r))
+                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_generator] wrote: {}".format(r))
                 data = next(it)
                 if data is None:
                     break
@@ -613,10 +571,83 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             'iterable' : 'stop',
             'data' : None,
         }
-        r = response_fmt.format(json.dumps(response))
-        l = len(r)
-        self._write('{:X}\r\n{}\r\n'.format(l, r))
-        self._write('0\r\n\r\n')
+        self._write_chunk(response_fmt.format(json.dumps(response)))
+        self._write_chunk('')
+        #  self._write('0\r\n\r\n')
+
+    def send_origin_headers(self):
+        if self.headers.get('Origin', '') == 'null':
+            self.send_header('Access-Control-Allow-Origin', self.headers.get('Origin'))
+        self.send_header('Vary', 'Origin')
+
+    def _serve(self, args):
+        error = False
+        try:
+            it = self._serve_route(args)
+            # it = sleeping_generator_test({}, {})
+            if issubclass(it.__class__, Exception):
+                response = {'code': 400, 'msg': 'returned exception {}: {}'.format(it.__class__, str(response))}
+                error = True
+                print('returned exception {}: {}'.format(it.__class__, str(response)))
+            elif str(type(it)) == "<class 'generator'>":
+                if idarest_plugin_t.config['api_debug']: print("[_serve] Generator!")
+                return self._serve_generator(it)
+            elif it.__class__.__name__ == "Queue":
+                if idarest_plugin_t.config['api_debug']: print("[_serve] Queue!")
+                return self._serve_queue(it)
+            else:
+                if isinstance(it, dict) and it.get('code', None):
+                    response = it
+                else:
+                    response = {
+                        'code' : 200,
+                        'msg'  : 'OK',
+                        'data' : it,
+                    }
+
+                    if isinstance(response['data'], dict):
+                        if 'error' in response['data']:
+                            response['code'] = 400
+                            response['msg'] = response['data']['error']
+                            if 'error_trace' in response['data']:
+                                response['traceback'] = response['data']['error_trace']
+                            response.pop('data')
+
+        except UnknownApiError as e:
+            self.send_error(e.code, e.msg)
+            return
+        except HTTPRequestError as e:
+            response = {'code': e.code, 'msg' : e.msg}
+        except ValueError as e:
+            response = {'code': 400, 'msg': 'ValueError: ' + str(e)}
+        except KeyError as e:
+            response = {'code': 400, 'msg': 'KeyError: ' + str(e)}
+        except StopIteration as e:
+            response = {'code': 400, 'msg': 'StopIteration: ' + str(e)}
+        except Exception as e:
+            response = {
+                    'code': 400, 
+                    'msg': '{}: {}'.format(_classname(e), str(e)),
+                    "traceback": traceback.format_exc()
+            }
+
+        
+
+        jsonp_callback = self._extract_callback()
+        if jsonp_callback:
+            content_type = 'application/javascript'
+            response_fmt = jsonp_callback + '({0});'
+        else:
+            content_type = 'application/json'
+            response_fmt = '{0}'
+
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_origin_headers()
+        self.end_headers()
+
+        self._write(response_fmt.format(json.dumps(response)))
+        return
 
     def _extract_post_map(self):
         content_type, _t = cgi.parse_header(self.headers.get('content-type'))
@@ -689,9 +720,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         """
         with ida_kernwin.disabled_script_timeout_t():
 
-            def delayed_exec(*args):
+            def delayed_exec():
                 f()
 
+            # delayed_exec_timer = QtCore.QTimer()
             delayed_exec_timer.singleShot(0, delayed_exec)
 
     @staticmethod
@@ -731,6 +763,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 # and execute the standard 'execute' action
                 ida_kernwin.process_ui_action("cli:Execute")
 
+            # delayed_exec_timer = QtCore.QTimer()
             delayed_exec_timer.singleShot(0, delayed_exec)
 
 
@@ -793,32 +826,50 @@ class IDARequestError(HTTPRequestError):
 class EvalInterpreter(InteractiveInterpreter):
     def __init__(self, locals=None):
         super(EvalInterpreter, self).__init__(locals)
-        self.buffer = ''
+        self.buffer  = []
+        self.stdout_list  = []
+        self.stderr_list  = []
 
     def write(self, data):
-        self.buffer += data
+        self.buffer.append(data)
 
     def eval(self, cmd):
-        global help
         is_help = cmd.startswith('help(')
-        _old_stdout = sys.stdout
-        _old_stderr = sys.stderr
-        if is_help:
-            _old_help = help       
-            help = pydoc.Helper()  
-
-        sys.stdout = sys.stderr = IDARestStdOut()
-        try:
+        result = None
+        r = None
+        with BorrowStdOut(self.stdout_list, self.stderr_list, is_help):
             r = self.runsource(cmd)
-            result = sys.stdout.buffer + self.buffer
-        finally:
-            sys.stdout = _old_stdout
-            sys.stderr = _old_stderr
-            if is_help:
-                help = _old_help
+            if isinstance(self.stderr_list, list): 
+                if self.stderr_list:
+                    start = False
+                    result = []
+                    for line in self.stderr_list:
+                        if 'File "<input>"' in line:
+                            start = True
+                        if start:
+                            result.append(line)
+                    if result:
+                        self.stderr_list = [self.stderr_list[0]] + result
+                        return {
+                                'code': 400,
+                                'msg': ''.join(self.stderr_list),
+                        }
+
+                result = ''.join(self.stdout_list + self.buffer)
+            
         if r != False:
             raise SyntaxError(cmd)
-        return result.rstrip('\n')
+        if isinstance(self.stdout_list, list): 
+            return result
+
+class EvalInterpreterQueue(EvalInterpreter):
+    def __init__(self, locals, queue):
+        super(EvalInterpreterQueue, self).__init__(locals)
+        self.buffer  = queue
+        self.stdout_list  = self.buffer
+        self.stderr_list  = self.buffer
+
+        self.buffer.append = self.buffer.put
 
 class IDARequestHandler(HTTPRequestHandler):
     @staticmethod
@@ -1105,7 +1156,7 @@ class IDARequestHandler(HTTPRequestHandler):
         :param args: [optional] comma seperated list of positional arguments
         :param *: [optional] keyword arguments
 
-        $ wget 'http://127.0.0.1:2001/ida/api/v1.0/call?cmd=type=idc.GetType(0x1412E9E98)&return=type' -O - -q
+        $ wget 'http://127.0.0.1:2000/ida/api/v1.0/call?cmd=_type=idc.GetType(0x1412E9E98)&return=_type' -O - -q
         {
             'code': 200,
             'msg': 'OK',
@@ -1153,12 +1204,12 @@ class IDARequestHandler(HTTPRequestHandler):
     @require_params('cmd',             'string to evaluate')
     @require_params('return:optional', 'variable to return, else return stdout')
     def eval(self, args):
-        """evaluate expression via python exec()
+        """evaluate expression via python exec() and return stdout/stderr (or variable)
 
         :param cmd: string to evaluate
         :param return: [optional] name of variable to return
 
-        $ wget 'http://127.0.0.1:2001/ida/api/v1.0/eval?cmd=type=idc.GetType(0x1412E9E98)&return=type' -O - -q
+        $ wget 'http://127.0.0.1:2000/ida/api/v1.0/eval?cmd=idc.GetType(0x1412E9E98)' -O - -q
         {
             'code': 200,
             'msg': 'OK',
@@ -1182,6 +1233,39 @@ class IDARequestHandler(HTTPRequestHandler):
         except Exception as e:
             return IDARequestHandler.error(e)
 
+    @HTTPRequestHandler.route('evalq')
+    @require_params('cmd',             'string to evaluate')
+    def evalq(self, args):
+        """evaluate expression via python exec() and return stdout via chunked queue
+
+        :param cmd: string to evaluate
+
+        $ wget 'http://127.0.0.1:2000/ida/api/v1.0/evalq?cmd=idc.GetType(0x1412E9E98)' -O - -q
+        {
+            'code': 200,
+            'msg': 'OK',
+            'data': 'void __fastcall(uint8_t *buffer, uint32_t data, uint32_t bits, int32_t offset)'
+        }
+
+        """
+        if idarest_plugin_t.config['api_debug']: idc.msg("Hello EvalQ\n")
+        try:
+            if not 'cmd' in args:
+                return IDARequestHandler.error('missing parameter \'cmd\'')
+            cmd = args['cmd']
+            if idarest_plugin_t.config['api_debug']: idc.msg('cmd: {}\n'.format(cmd))
+            q = Queue()
+            i = EvalInterpreterQueue(superglobals(), q)
+            def delayed():
+                i.eval(cmd)
+            HTTPRequestHandler.delayed_call(delayed)
+
+            #  _result = i.eval(cmd)
+
+            return q
+        except Exception as e:
+            return IDARequestHandler.error(e)
+
     @HTTPRequestHandler.route('cli')
     @require_params('cmd', 'string to evaluate')
     def cli(self, args):
@@ -1199,7 +1283,7 @@ class IDARequestHandler(HTTPRequestHandler):
         except Exception as e:
             return IDARequestHandler.error(e)
 
-class IDARestStdOut:
+class _IDARestStdOut:
     """
     Dummy file-like class that receives stout and stderr
     """
@@ -1291,7 +1375,7 @@ def PLUGIN_ENTRY():
     globals()['instance'] = idarest_main() # idarest_plugin_t()
     return globals()['instance']
 
-def idarest_main():
+def idarest_main(*args):
     # pretend to be a plugin
     if idarest_main.instance is None:
         idarest_main.instance = ir = idarest_plugin_t()
@@ -1350,8 +1434,7 @@ def idarest_main():
     ### end example route
 
 
-    ### some stuff I use that won't work for you, also requires `superglobals`
-    ### from pip
+    ### some stuff I use that won't work for you
     def relist_iter(self, args):
         return iter_retrace_list(q, once=1)
 
@@ -1420,48 +1503,48 @@ def is_plugin():
 
 # find existing instance of idarest (unless we're loading as an ida plugin)
 def get_ir():
-    if idarest_plugin_t.config['api_debug']: idc.msg("attempting to find existing idarest instance...\n")
+    if idarest_plugin_t.config['api_debug']: idc.msg("[get_ir] attempting to find existing idarest instance...\n")
     # check if idarest is loaded as a plugin
     ir = None
-    if idarest_plugin_t.config['api_debug']: idc.msg('sys.modules.__plugins__\n')
+    if idarest_plugin_t.config['api_debug']: idc.msg('[get_ir] sys.modules.__plugins__\n')
     for k in [x for x in sys.modules if x.startswith('__plugins__')]:
-        if idarest_plugin_t.config['api_debug']: idc.msg('    ' + k + '\n')
-    if idarest_plugin_t.config['api_debug']: idc.msg('sys.modules.__plugins__ via getglobal\n')
-    for k in [x for x in getglobal('sys.modules') if x.startswith('__plugins__')]:
-        if idarest_plugin_t.config['api_debug']: idc.msg('    ' + k + '\n')
+        if idarest_plugin_t.config['api_debug']: idc.msg('[get_ir]     ' + k + '\n')
     ir = ir or getglobal('sys.modules.__plugins__idarest_plugin.instance', None)
     if ir:
-        if idarest_plugin_t.config['api_info']: idc.msg("got reference to idarest from sys.modules.__plugins__idarest_plugin.instance\n")
+        if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from sys.modules.__plugins__idarest_plugin.instance\n")
     else:
         ir = ir or getglobal('sys.modules.__plugins__idarest.instance', None)
         if ir:
-            if idarest_plugin_t.config['api_info']: idc.msg("got reference to idarest from sys.modules.__plugins__idarest.instance\n")
+            if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from sys.modules.__plugins__idarest.instance\n")
         # check if idarest is loaded as a module
         else:
             ir = ir or getglobal('sys.modules.idarest.instance', None)
             if ir:
-                if idarest_plugin_t.config['api_info']: idc.msg("got reference to idarest from sys.modules.idarest.instance\n")
+                if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from sys.modules.idarest.instance\n")
             else:
                 # check if idarest is loaded in global context
                 ir = ir or getglobal('idarest_main.instance', None)
                 if ir:
-                    if idarest_plugin_t.config['api_info']: idc.msg("got reference to idarest from idarest_main.instance (will restart)\n")
+                    if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from idarest_main.instance (will restart)\n")
                     # else start a new idarest instance
                     if ir and _load_method == "direct":
                         ir.term()
                         ir = None
 
     if not ir:
-        if idarest_plugin_t.config['api_info']: idc.msg("restarting\n")
-        ir = ir or idarest_main(idarest_plugin_t.config['api_port'])
+        if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] restarting\n")
+        ir = ir or idarest_main()
 
     return ir
 
+def get_ir_plugin():
+    return sys.modules['__plugins__idarest_plugin']
+
 def reload_idarest():
-    l = ida_loader.load_plugin(sys.modules['__plugins__idarest_plugin'].__file__)
+    l = ida_loader.load_plugin(get_ir_plugin().__file__)
     ida_load.run_plugin(l, 0)
     unload('idarest')
-    l = ida_loader.load_plugin(sys.modules['__plugins__idarest_plugin'].__file__)
+    l = ida_loader.load_plugin(get_ir_plugin().__file__)
 
     #    import gc
     #    ir = getglobal('sys.modules.__plugins__idarest_plugin.instance') or getglobal('sys.modules.idarest.instance') or getglobal('idarest_main.instance')
@@ -1490,3 +1573,14 @@ def reload_idarest():
     #  ir.term()
 #  print('registered atexit cleanup2')
 #  atexit.register(cleanup)
+
+def test_eval(cmd):
+    ir = getglobal('ir', None)
+    if ir:
+        ir.term()
+    unload('idarest')
+    _from('idarest.idarest import EvalInterpreter, get_ir')
+    setglobal('ir', get_ir())
+    e = EvalInterpreter(superglobals())
+    r = e.eval(cmd)
+    return r

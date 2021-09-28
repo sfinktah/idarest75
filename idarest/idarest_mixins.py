@@ -1,7 +1,17 @@
 import os
+import sys
 import json
-import idaapi
-import idc
+import pydoc
+from superglobals import *
+
+try:
+    import idaapi
+    import idc
+except:
+    class idaapi:
+        def get_user_idadir(): return '.'
+    class idc:
+        def get_idb_path(): return '.'
 
 class Namespace(object):
     pass
@@ -25,6 +35,8 @@ class IdaRestConfiguration:
        'master_info':  True,
        'client_debug': True,
        'client_info':  True,
+
+       'api_queue_result_qget_timeout': 10,
     }
 
     @staticmethod
@@ -117,3 +129,71 @@ class IdaRestConfiguration:
             except Exception as e:
                 print("[IdaRestConfiguration::load_configuration] failed to load project config file: {0}".format(str(e)))
    
+
+class BorrowStdOut:
+    class IDARestStdOutQueue:
+        def __init__(self, queue):
+            self.queue = queue
+
+        def write(self, text):
+            # NB: in case 'text' is Unicode, msg() will decode it
+            # and call msg() to print it
+            self.queue.put(text)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    class IDARestStdOut:
+        """
+        Dummy file-like class that receives stout and stderr
+        """
+        def __init__(self, buffer=[]):
+            self.buffer = buffer
+            #  self.buffer = ''
+
+        def write(self, text):
+            # NB: in case 'text' is Unicode, msg() will decode it
+            # and call msg() to print it
+            self.buffer.append(text)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    def get_output_class(self, t):
+        if t.__class__.__name__ == 'Queue':
+            return self.IDARestStdOutQueue
+        elif isinstance(t, list):
+            return self.IDARestStdOut
+
+    def __init__(self, stdout=None, stderr=None, is_help=False):
+        self.stdout_list = stdout
+        self.stderr_list = stderr
+        self.is_help = is_help
+
+        #  self.stdout = None
+        #  self.stderr = None
+        self.help = None
+
+    def __enter__(self):
+        self.stdout, self.stderr = sys.stdout, sys.stderr
+        _cls = self.get_output_class(self.stdout_list)
+        print("_cls: {}".format(_cls.__name__))
+        # sys.stdout, sys.stderr = self.IDARestStdOut(self.stdout_list), self.IDARestStdOut(self.stderr_list)
+        sys.stdout, sys.stderr = _cls(self.stdout_list), _cls(self.stderr_list)
+        if self.is_help:
+            self.help = setglobal('help', pydoc.Helper())
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        global help
+        sys.stdout, sys.stderr = self.stdout, self.stderr
+        if self.help:
+            setglobal('help', self.help)
+        if self.stdout_list.__class__.__name__ == 'Queue':
+            self.stdout_list.put(None)

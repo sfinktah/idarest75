@@ -166,23 +166,23 @@ var updater = {
         // window.setTimeout(updater.poll, updater.errorSleepTime);
     },
 
-    newMessages: function(response) {
-        console.log('newMessages: response: ' + response);
-        if (!response.msg) return;
-        if (response.code != 200 || response.msg != 'OK') {
-            updater.showMessage("Error [" + response.code + "] " + response.msg + "");
-            return;
-        };
-        var data = response.data;
-        // var messages = response.messages;
-        // updater.cursor = messages[messages.length - 1].id;
-        // console.log(messages.length, "new messages, cursor:", updater.cursor);
-        updater.showMessage(response)
-        // for (var i = 0; i < messages.length; i++) {
-            // updater.showMessage(messages[i]);
-        // }
-    },
-
+    // newMessages: function(response) {
+        // console.log('newMessages: response: ' + response);
+        // if (!response.msg) return;
+        // // if (response.code != 200 || response.msg != 'OK') {
+            // // updater.showMessage("Error [" + response.code + "] " + response.msg + "", 1);
+            // // return;
+        // // };
+        // var data = response.data;
+        // // var messages = response.messages;
+        // // updater.cursor = messages[messages.length - 1].id;
+        // // console.log(messages.length, "new messages, cursor:", updater.cursor);
+        // updater.showMessage(response)
+        // // for (var i = 0; i < messages.length; i++) {
+            // // updater.showMessage(messages[i]);
+        // // }
+    // },
+// 
     showMessage: function(idb, response) {
         console.log('showMessage', idb, response);
           /*
@@ -195,20 +195,28 @@ var updater = {
            */
 
         // var existing = $("#m" + (Math.random() * 100) >>> 0);
-        message = ''
+        let message = ''
+        let error = 0
         if (response.code != 200 || response.msg != 'OK') {
             message = "Error [" + response.code + "] " + response.msg + "";
+            error = 1
         }
         else {
             message = response.data;
+            if (isNumber(message))
+                message = "0x" + message.toString(16);
         }
-        if (isNumber(message))
-            message = "0x" + message.toString(16);
 
         // var node = $('#m_template').clone();
         var node = $div('.message').hide();
         $div('.idb').text(idb).appendTo(node)
-        $div('.response').append($pre().text(message)).appendTo(node)
+
+        if (error) {
+            $div('.response').addClass('stderr').append($pre().text(message)).appendTo(node);
+        }
+        else {
+            $div('.response').addClass('stdout').append($pre().text(message)).appendTo(node)
+        }
         console.log('node', node);
         // node.hide();
         $("#inbox").append(node);
