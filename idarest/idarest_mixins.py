@@ -82,9 +82,12 @@ class IdaRestConfiguration:
        # default
   
         # load configuration from file
+        saved_config = {}
+        self.config = dict()
         try:
             f = open(self.CFG_FILE, "r")
             self.config.update(json.load(f))
+            saved_config = self.config.copy()
             f.close()
             print("[IdaRestConfiguration::load_configuration] loaded global config file")
         except IOError:
@@ -108,14 +111,18 @@ class IdaRestConfiguration:
            'master_info':  True,
            'client_debug': True,
            'client_info':  True,
+
+           'api_queue_result_qget_timeout': 10,
         })
 
-        try:
-            json.dump(self.config, open(self.CFG_FILE, "w"))
-        except Exception as e:
-            print("[IdaRestConfiguration::load_configuration] failed to save global config file, with exception: {0}".format(str(e)))
-        else:
-            print("[IdaRestConfiguration::load_configuration] global configuration saved to {0}".format(self.CFG_FILE))
+        print(self.config)
+        print(saved_config)
+        if self.config != saved_config:
+            try:
+                json.dump(self.config, open(self.CFG_FILE, "w"), indent=4)
+                print("[IdaRestConfiguration::load_configuration] global configuration saved to {0}".format(self.CFG_FILE))
+            except Exception as e:
+                print("[IdaRestConfiguration::load_configuration] failed to save global config file, with exception: {0}".format(str(e)))
 
         if os.path.exists(self.PROJECT_CFG_FILE):
             print("[IdaRestConfiguration::load_configuration] loading project config file: {0}".format(self.PROJECT_CFG_FILE))

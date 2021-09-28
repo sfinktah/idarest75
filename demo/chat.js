@@ -49,6 +49,10 @@ function newMessage(action, form) {
     console.log('newMessage:', action, message)
     request = {}
     switch (action) {
+        case 'eval2':
+            request.cmd = message.body
+            updater.getChunked(action, request, form);
+            return;
         case 'eval':
         case 'call':
             request.cmd = message.body
@@ -166,6 +170,10 @@ var updater = {
         // window.setTimeout(updater.poll, updater.errorSleepTime);
     },
 
+    idbAsClass: function(s) {
+        return s.replace(/[^\w]/g, '-');
+    },
+
     // newMessages: function(response) {
         // console.log('newMessages: response: ' + response);
         // if (!response.msg) return;
@@ -197,20 +205,38 @@ var updater = {
         // var existing = $("#m" + (Math.random() * 100) >>> 0);
         let message = ''
         let error = 0
-        if (response.code != 200 || response.msg != 'OK') {
+        if (response.code != 200 || response.msg == 'FAIL') {
             message = "Error [" + response.code + "] " + response.msg + "";
             error = 1
         }
-        else {
+        else if (response.code == 200 && response.msg == 'OK') {
             message = response.data;
             if (isNumber(message))
                 message = "0x" + message.toString(16);
         }
+        else if (response.code == 200 && response.msg == 'CONTROL') {
+            for (let [type, status] of Object.entries(response.control)) {
+                console.log(`Control Message: ${type} [${status}]`);
+            }
+            return;
+        }
+
+
+        var node_exists = false;
+        var node;
+        if (response.oob != null && response.oob.count != null && response.oob.count !== 0) {
+            node_exists = true;
+            node = $(`div[data-idb="${updater.idbAsClass(idb)}"]`).last().parent();
+            if (!node.length) {
+                node_exists = false;
+            }
+        }
 
         // var node = $('#m_template').clone();
-        var node = $div('.message').hide();
-        $div('.idb').text(idb).appendTo(node)
-
+        if (!node_exists) {
+            node = $div('.message').hide();
+            $div('.idb').attr(`data-idb`, updater.idbAsClass(idb)).text(idb).appendTo(node)
+        }
         if (error) {
             $div('.response').addClass('stderr').append($pre().text(message)).appendTo(node);
         }
@@ -230,5 +256,95 @@ var updater = {
         $("#inbox").append(node);
         node.slideDown();
     },
+
+    getChunkedWorker: function(url, data = {}, callback) {
+        // $.postJSON(host + action, request, function(response) {
+        
+        // Default options are marked with *
+        fetch(url, {
+            method: 'GET', // *GET, POST, PUT, DELETE, etc.
+            mode: 'cors', // no-cors, *cors, same-origin
+            cache: 'no-cache', // *default, no-cache, reload, force-cache, only-if-cached
+            credentials: 'omit', // include, *same-origin, omit
+            // headers: {
+                // 'Content-Type': 'application/json'
+                // // 'Content-Type': 'application/x-www-form-urlencoded',
+            // },
+            redirect: 'follow', // manual, *follow, error
+            referrerPolicy: 'strict-origin-when-cross-origin', // no-referrer, *no-referrer-when-downgrade, origin, origin-when-cross-origin, same-origin, strict-origin, strict-origin-when-cross-origin, unsafe-url
+            // body: JSON.stringify(data) // body data type must match "Content-Type" header
+        }).then(function (response) {
+            let reader = response.body.getReader();
+            let decoder = new TextDecoder();
+            return readData();
+
+            function readData() {
+                return reader.read().then(function ({value, done}) {
+                    let newData = decoder.decode(value, {stream: !done});
+                    callback(newData);
+                    console.log("data: " + newData + "<<");
+                    if (done) {
+                        console.log('Stream complete');
+                        return;
+                    }
+                    return readData();
+                });
+            }
+        });
+    },
+    getChunked: function(action, data, form) {
+        /*
+         * let x = new XMLHttpRequest();
+         * x.open("GET", "/GetChunkedData", false)
+         * x.onprogress = function () {
+         *     console.log(x.responseText)
+         * }
+         * x.send();
+         */
+        function jsonToURI(json){ return encodeURIComponent(JSON.stringify(json)); }
+        // This should probably only be used if all JSON elements are strings
+        function xwwwfurlenc(srcjson){
+            if(typeof srcjson !== "object")
+              if(typeof console !== "undefined"){
+                console.log("\"srcjson\" is not a JSON object");
+                return null;
+              }
+            u = encodeURIComponent;
+            var urljson = "";
+            var keys = Object.keys(srcjson);
+            for(var i=0; i <keys.length; i++){
+                urljson += u(keys[i]) + "=" + u(srcjson[keys[i]]);
+                if(i < (keys.length-1))urljson+="&";
+            }
+            return urljson;
+        }
+
+        for (let [idb, host] of Object.entries(updater.client_urls)) {
+            updater.getChunkedWorker(host + action + '?' + xwwwfurlenc(data), data, function(response) {
+                let lines = response.split('\n');
+                while (lines.length > 1) {
+                    let len = parseInt(lines[0], 16);
+                    let len2 = lines[1].length;
+                    if (len <= len2) {
+                        let line = lines[1].substr(0, len);
+                        try {
+                        updater.showMessage(idb, JSON.parse(line));
+                        }
+                        catch (SyntaxError) {
+                        }
+                    }
+                    lines = lines.splice(2);
+                }
+                // if (message.id) {
+                    // form.parent().remove();
+                // } else {
+                form.find("input[type=text]").val("").select();
+                var disabled = form.find("input[type=submit]");
+                disabled.enable();
+                console.log("enabling inputs");
+                // }
+            });
+        }
+    }
 
 };

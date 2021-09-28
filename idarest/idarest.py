@@ -12,6 +12,7 @@ import time
 import traceback
 import atexit
 import inspect
+import itertools
 import urllib.request, urllib.error, urllib.parse as urlparse
 from code import InteractiveInterpreter
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -467,65 +468,9 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def _serve_queue(self, q):
         response = {
             'code':  200,
-            'msg':   'OK',
-            'queue': 'start',
-            'data':  'queue',
-        }
-
-        jsonp_callback = self._extract_callback()
-        if jsonp_callback:
-            content_type = 'application/javascript'
-            response_fmt = jsonp_callback + '({0});'
-        else:
-            content_type = 'application/json'
-            response_fmt = '{0}'
-
-        self.send_response(200)
-        self.send_header('Content-Type', content_type)
-        self.send_header('Transfer-Encoding', 'chunked')
-        self.end_headers()
-
-        try:
-            while True:
-                self._write_chunk(response_fmt.format(json.dumps(response)))
-
-                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}".format(response))
-                data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout'])
-                if data is None:
-                    if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None")
-                    break
-                response = {
-                    'code' : 200,
-                    'msg'  : 'OK',
-                    'queue': True,
-                    'data' : data,
-                }
-                if isinstance(response['data'], dict):
-                    if 'error' in response['data']:
-                        response['msg'] = 'FAIL'
-        except Empty:
-            pass
-
-        response = {
-            'code' : 200,
-            'msg'  : 'OK',
-            'queue' : 'stop',
-            'data' : None,
-        }
-        self._write_chunk(response_fmt.format(json.dumps(response)))
-        self._write_chunk('')
-        # self._write('0\r\n\r\n')
-
-    def _serve_generator(self, it):
-        iterable = True
-        exception = True
-        queue = True
-
-        response = {
-            'code' : 200,
-            'msg'  : 'OK',
-            'iterable' : 'start',
-            'data' : 'iterable',
+            'msg':   'CONTROL',
+            'control': {'queue': 'stop'},
+            'data': False,
         }
 
         jsonp_callback = self._extract_callback()
@@ -539,12 +484,68 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', content_type)
         self.send_origin_headers()
-        if iterable:
-            self.send_header('Transfer-Encoding', 'chunked')
+        self.send_header('Transfer-Encoding', 'chunked')
         self.end_headers()
 
         try:
-            while True:
+            for i in itertools.count(start=0):
+                self._write_chunk(response_fmt.format(json.dumps(response)))
+
+                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}".format(response))
+                data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout'])
+                if data is None:
+                    if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None")
+                    break
+                response = {
+                    'code': 200,
+                    'msg':  'OK',
+                    'oob':  {'count': i},
+                    'data': data,
+                }
+                if isinstance(response['data'], dict):
+                    if 'error' in response['data']:
+                        response['msg'] = 'FAIL'
+        except Empty:
+            pass
+
+        response = {
+            'code':    200,
+            'msg':     'CONTROL',
+            'control': {'queue': 'stop'},
+            'data':    False,
+        }
+        self._write_chunk(response_fmt.format(json.dumps(response)))
+        self._write_chunk('')
+        # self._write('0\r\n\r\n')
+
+    def _serve_generator(self, it):
+        iterable = True
+        exception = True
+        queue = True
+
+        response = {
+            'code' : 200,
+            'msg'  : 'CONTROL',
+            'data' : False,
+            'control': {'iterable': 'start'},
+        }
+
+        jsonp_callback = self._extract_callback()
+        if jsonp_callback:
+            content_type = 'application/javascript'
+            response_fmt = jsonp_callback + '({0});'
+        else:
+            content_type = 'application/json'
+            response_fmt = '{0}'
+
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_origin_headers()
+        self.send_header('Transfer-Encoding', 'chunked')
+        self.end_headers()
+
+        try:
+            for i in itertools.count(start=0):
                 self._write_chunk(response_fmt.format(json.dumps(response)))
 
                 if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_generator] wrote: {}".format(r))
@@ -556,7 +557,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 response = {
                     'code' : 200,
                     'msg'  : 'OK',
-                    'iterable' : True,
+                    'oob': {'count': i},
                     'data' : data,
                 }
                 if isinstance(response['data'], dict):
@@ -567,9 +568,9 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
         response = {
             'code' : 200,
-            'msg'  : 'OK',
-            'iterable' : 'stop',
-            'data' : None,
+            'msg'  : 'CONTROL',
+            'control': {'iterable': 'stop'},
+            'data' : False,
         }
         self._write_chunk(response_fmt.format(json.dumps(response)))
         self._write_chunk('')
