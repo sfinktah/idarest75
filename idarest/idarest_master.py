@@ -111,7 +111,7 @@ def idarest_master():
             host, port = args['host'], args['port']
             key = host + ':' + port
             if key in self.hosts:
-                if idarest_master_plugin_t.config['master_debug']: print("removing existing host {}".format(key))
+                if idarest_master_plugin_t.config['master_debug']: print("[idarest_master::Handler::unregister] removing existing host {}".format(key))
                 value = self.hosts.pop(key)
             else:
                 value = dict({

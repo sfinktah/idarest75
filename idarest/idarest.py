@@ -177,7 +177,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
                 timer.join()
                 idc.msg("[idarest_plugin_t::start::cleanup] stopped\n")
 
-        print('registered atexit cleanup')
+        print('[idarest_plugin_t::start] registered atexit cleanup')
         atexit.register(cleanup)
 
 
@@ -341,7 +341,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def get_result(uid):
         try:
-            value = HTTPRequestHandler.idarest_queue[uid].get(timeout=1)
+            value = HTTPRequestHandler.idarest_queue[uid].get(timeout=2)
             if str(type(value)) == "<class 'generator'>":
                 if idarest_plugin_t.config['api_debug']: idc.msg("[get_result] return wrapped_iter")
                 return HTTPRequestHandler.wrapped_iter(value)
@@ -490,7 +490,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 self._write_chunk(response_fmt.format(json.dumps(response)))
 
                 if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}".format(response))
-                data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout')
+                data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout'])
                 if data is None:
                     if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None")
                     break
