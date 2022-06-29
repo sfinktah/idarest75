@@ -23,7 +23,7 @@ $(document).ready(function() {
     if (!window.console) window.console = {};
     if (!window.console.log) window.console.log = function() {};
 
-    var default_action = 'eval'
+    var default_action = 'evalq'
     updater.updateClientUrls();
     $("#messageform").on("submit", function(e) {
         console.log('e', e.originalEvent.submitter.name);
@@ -42,6 +42,25 @@ $(document).ready(function() {
     // updater.poll();
 });
 
+function jsonToURI(json){ return encodeURIComponent(JSON.stringify(json)); }
+// This should probably only be used if all JSON elements are strings
+function xwwwfurlenc(srcjson){
+    if(typeof srcjson !== "object")
+      if(typeof console !== "undefined"){
+        console.log("\"srcjson\" is not a JSON object");
+        return null;
+      }
+    u = encodeURIComponent;
+    var urljson = "";
+    var keys = Object.keys(srcjson);
+    for(var i=0; i <keys.length; i++){
+        urljson += u(keys[i]) + "=" + u(srcjson[keys[i]]);
+        if(i < (keys.length-1))urljson+="&";
+    }
+    return urljson;
+}
+
+
 function newMessage(action, form) {
     var message = form.formToDict();
     var disabled = form.find("input[type=submit]");
@@ -49,8 +68,13 @@ function newMessage(action, form) {
     console.log('newMessage:', action, message)
     request = {}
     switch (action) {
-        case 'eval2':
+        case 'evalq':
+            updater.addMessage("idarest75>" + message.body);
             request.cmd = message.body
+            updater.getChunked(action, request, form);
+            return;
+        case 'q2':
+        case 'tap':
             updater.getChunked(action, request, form);
             return;
         case 'eval':
@@ -192,7 +216,7 @@ var updater = {
     // },
 // 
     showMessage: function(idb, response) {
-        console.log('showMessage', idb, response);
+        // console.log('showMessage', idb, response);
           /*
            * <div id="inbox">
            *   <div class="message" id="m_template" style="display: none">
@@ -221,12 +245,23 @@ var updater = {
             return;
         }
 
+        if (isString(message))
+            message = message.trimEnd();
+
 
         var node_exists = false;
         var node;
-        if (response.oob != null && response.oob.count != null && response.oob.count !== 0) {
+        var node_parent;
+        var idb_class = updater.idbAsClass(idb);
+        if (true || response.oob != null && response.oob.count != null && response.oob.count !== 0) {
             node_exists = true;
-            node = $(`div[data-idb="${updater.idbAsClass(idb)}"]`).last().parent();
+            node = $(`div[data-idb="${idb_class}"]`); // .last().parent();
+            if (node.length > 1) {
+                console.log('node_length: ' + node.length);
+            }
+            node_parent = node.parent();
+            node = node_parent.find('.message-inner-inner');
+            
             if (!node.length) {
                 node_exists = false;
             }
@@ -234,27 +269,45 @@ var updater = {
 
         // var node = $('#m_template').clone();
         if (!node_exists) {
-            node = $div('.message').hide();
-            $div('.idb').attr(`data-idb`, updater.idbAsClass(idb)).text(idb).appendTo(node)
+            console.log('!node_exists');
+            node_parent = $div('.message.col-xs-12.col-sm-12.col-md-12.col-lg-6'); // .hide();
+            $div('.idb').attr(`data-idb`, idb_class).text(idb).appendTo(node_parent)
+            $div('.message-inner').append($div('.message-inner-inner')).appendTo(node_parent)
+            node = node_parent.find('.message-inner-inner')
+            // node_parent.append(node)
         }
+        var $response = null;
         if (error) {
-            $div('.response').addClass('stderr').append($pre().text(message)).appendTo(node);
+            $response = $div('.response').addClass('stderr').append($pre().text(message)).appendTo(node);
         }
         else {
-            $div('.response').addClass('stdout').append($pre().text(message)).appendTo(node)
+            $response = $div('.response').addClass('stdout').append($pre().text(message)).appendTo(node)
         }
-        console.log('node', node);
+        // console.log('node', node);
         // node.hide();
-        $("#inbox").append(node);
-        node.slideDown();
+        if (!node_exists) {
+            $("#inbox").append(node_parent);
+            node.slideDown();
+        }
+        else {
+            if ($response != null) {
+                $response.slideDown();
+            }
+        }
     },
 
     addMessage: function(message) {
-        var node = $("<pre class='message'>").text(message);
-        console.log('node', node);
-        node.hide();
-        $("#inbox").append(node);
-        node.slideDown();
+        var node = $("<pre class='query'>").text(message);
+        console.log('addMessage node', node);
+        // node.hide();
+        $('.message').each(function(k, v) {
+            console.log('k', k, 'v', v);
+            let c = node.clone();
+            $(v).append(c);
+            // c.slideDown();
+        });
+        // $("#inbox").append(node);
+        // node.slideDown();
     },
 
     getChunkedWorker: function(url, data = {}, callback) {
@@ -282,14 +335,16 @@ var updater = {
                 return reader.read().then(function ({value, done}) {
                     let newData = decoder.decode(value, {stream: !done});
                     callback(newData);
-                    console.log("data: " + newData + "<<");
+                    // console.log("data: " + newData + "<<");
                     if (done) {
-                        console.log('Stream complete');
+                        // console.log('Stream complete');
                         return;
                     }
                     return readData();
                 });
             }
+        }).catch((error) => {
+              console.error('.catch error: ' + error);
         });
     },
     getChunked: function(action, data, form) {
@@ -301,49 +356,35 @@ var updater = {
          * }
          * x.send();
          */
-        function jsonToURI(json){ return encodeURIComponent(JSON.stringify(json)); }
-        // This should probably only be used if all JSON elements are strings
-        function xwwwfurlenc(srcjson){
-            if(typeof srcjson !== "object")
-              if(typeof console !== "undefined"){
-                console.log("\"srcjson\" is not a JSON object");
-                return null;
-              }
-            u = encodeURIComponent;
-            var urljson = "";
-            var keys = Object.keys(srcjson);
-            for(var i=0; i <keys.length; i++){
-                urljson += u(keys[i]) + "=" + u(srcjson[keys[i]]);
-                if(i < (keys.length-1))urljson+="&";
-            }
-            return urljson;
-        }
-
         for (let [idb, host] of Object.entries(updater.client_urls)) {
-            updater.getChunkedWorker(host + action + '?' + xwwwfurlenc(data), data, function(response) {
-                let lines = response.split('\n');
-                while (lines.length > 1) {
-                    let len = parseInt(lines[0], 16);
-                    let len2 = lines[1].length;
-                    if (len <= len2) {
-                        let line = lines[1].substr(0, len);
-                        try {
-                        updater.showMessage(idb, JSON.parse(line));
+            try {
+                updater.getChunkedWorker(host + action + '?' + xwwwfurlenc(data), data, function(response) {
+                    let lines = response.split('\n');
+                    while (lines.length > 1) {
+                        let len = parseInt(lines[0], 16);
+                        let len2 = lines[1].length;
+                        if (len <= len2) {
+                            let line = lines[1].substr(0, len);
+                            try {
+                                updater.showMessage(idb, JSON.parse(line));
+                            }
+                            catch (SyntaxError) {
+                            }
                         }
-                        catch (SyntaxError) {
-                        }
+                        lines = lines.splice(2);
                     }
-                    lines = lines.splice(2);
-                }
-                // if (message.id) {
-                    // form.parent().remove();
-                // } else {
-                form.find("input[type=text]").val("").select();
-                var disabled = form.find("input[type=submit]");
-                disabled.enable();
-                console.log("enabling inputs");
-                // }
-            });
+                    // if (message.id) {
+                        // form.parent().remove();
+                    // } else {
+                    form.find("input[type=text]").val("").select();
+                    var disabled = form.find("input[type=submit]");
+                    disabled.enable();
+                    // console.log("enabling inputs");
+                    // }
+                });
+            }
+            catch {
+            }
         }
     }
 

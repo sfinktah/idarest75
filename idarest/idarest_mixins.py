@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import pydoc
+from queue import Full
 from superglobals import *
 
 try:
@@ -16,6 +17,16 @@ except:
 class Namespace(object):
     pass
 
+class IdaRestLog:
+    PROJECT_LOG_FILE = os.path.join( os.path.dirname( idc.get_idb_path() ), "idarest.log" )
+
+    @staticmethod
+    def log(msg):
+        with open(IdaRestLog.PROJECT_LOG_FILE, 'a') as f:
+            f.write(msg.rstrip() + "\n")
+
+
+
 class IdaRestConfiguration:
 
     CFG_FILE = os.path.join(idaapi.get_user_idadir(), "idarest.cfg")
@@ -29,12 +40,17 @@ class IdaRestConfiguration:
 
        'api_prefix':   '/ida/api/v1.0',
 
-       'api_debug':    True,
+       'api_verbose':  False,
+       'api_debug':    False,
        'api_info':     True,
-       'master_debug': True,
-       'master_info':  True,
-       'client_debug': True,
+       'master_debug': False,
+       'master_info':  False,
+       'client_debug': False,
        'client_info':  True,
+
+       'client_connect_timeout': 2,
+       'client_read_timeout': 2,
+       'client_update_hosts_timeout': 2,
 
        'api_queue_result_qget_timeout': 10,
     }
@@ -83,7 +99,6 @@ class IdaRestConfiguration:
   
         # load configuration from file
         saved_config = {}
-        self.config = dict()
         try:
             f = open(self.CFG_FILE, "r")
             self.config.update(json.load(f))
@@ -96,27 +111,26 @@ class IdaRestConfiguration:
             print("[IdaRestConfiguration::load_configuration] failed to load global config file: {0}".format(str(e)))
    
         # use default values if not defined in config file
-        self._defaults(self.config, {
-           'api_host':     '127.0.0.1',
-           'api_port':     2000,
+        #  self._defaults(self.config, {
+           #  'api_host':     '127.0.0.1',
+           #  'api_port':     2000,
+#  
+           #  'master_host':  '127.0.0.1',
+           #  'master_port':  28612,
+#  
+           #  'api_prefix':   '/ida/api/v1.0',
+#  
+           #  'api_verbose':    False,
+           #  'api_debug':    False,
+           #  'api_info':     True,
+           #  'master_debug': False,
+           #  'master_info':  False,
+           #  'client_debug': True,
+           #  'client_info':  True,
+#  
+           #  'api_queue_result_qget_timeout': 10,
+        #  })
 
-           'master_host':  '127.0.0.1',
-           'master_port':  28612,
-
-           'api_prefix':   '/ida/api/v1.0',
-
-           'api_debug':    True,
-           'api_info':     True,
-           'master_debug': True,
-           'master_info':  True,
-           'client_debug': True,
-           'client_info':  True,
-
-           'api_queue_result_qget_timeout': 10,
-        })
-
-        print(self.config)
-        print(saved_config)
         if self.config != saved_config:
             try:
                 json.dump(self.config, open(self.CFG_FILE, "w"), indent=4)
@@ -138,14 +152,41 @@ class IdaRestConfiguration:
    
 
 class BorrowStdOut:
-    class IDARestStdOutQueue:
+
+    @staticmethod
+    def is_default_stdout(out):
+        return out.__class__.__name__ == 'IDAPythonStdOut'
+
+    class IDARestStdOutTee:
+        def __init__(self, out1, out2):
+            self.out1 = out1
+            self.out2 = out2
+
+        def write(self, text):
+            # NB: in case 'text' is Unicode, msg() will decode it
+            # and call msg() to print it
+            # self.queue.put(text)
+            self.out1.write(text)
+            self.out2.write(text)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+    class IDARestStdOutQueue(object):
         def __init__(self, queue):
             self.queue = queue
 
         def write(self, text):
             # NB: in case 'text' is Unicode, msg() will decode it
             # and call msg() to print it
-            self.queue.put(text)
+            # self.queue.put(text)
+            try:
+                self.queue.put_nowait(text)
+            except Full:
+                pass
 
         def flush(self):
             pass
@@ -190,7 +231,6 @@ class BorrowStdOut:
     def __enter__(self):
         self.stdout, self.stderr = sys.stdout, sys.stderr
         _cls = self.get_output_class(self.stdout_list)
-        print("_cls: {}".format(_cls.__name__))
         # sys.stdout, sys.stderr = self.IDARestStdOut(self.stdout_list), self.IDARestStdOut(self.stderr_list)
         sys.stdout, sys.stderr = _cls(self.stdout_list), _cls(self.stderr_list)
         if self.is_help:

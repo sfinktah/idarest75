@@ -16,7 +16,7 @@ import itertools
 import urllib.request, urllib.error, urllib.parse as urlparse
 from code import InteractiveInterpreter
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from socketserver import ThreadingMixIn
 
 # pip install superglobal split_paren
@@ -24,9 +24,9 @@ from superglobals import setglobal, getglobal, superglobals
 from split_paren import paren_multisplit
 
 try:
-    from .idarest_mixins import IdaRestConfiguration, BorrowStdOut
+    from .idarest_mixins import IdaRestConfiguration, BorrowStdOut, IdaRestLog
 except:
-    from idarest_mixins import IdaRestConfiguration, BorrowStdOut
+    from idarest_mixins import IdaRestConfiguration, BorrowStdOut, IdaRestLog
 
 # for testing outside ida
 try:
@@ -70,7 +70,7 @@ def _asBytes(s):
     return s
 
 def _asStringRaw(o):
-    return o.decode('raw_unicode_escape') if (isBytes(o) or isByteArray(o)) else o
+    return o.decode('raw_unicode_escape') if isinstance(o, (bytes, bytearray)) else o
 
 def _execute_sync(cmd, *args):
     if ida_pro.is_main_thread():
@@ -89,12 +89,12 @@ Define an IDA Python plugin required class and function.
 # If used as a plugin everything just becomes harder, though it does clean-up used ports
 # properly. 
 MENU_PATH = 'Edit/Other'
-class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
+class idarest_plugin_t(IdaRestConfiguration, IdaRestLog, ida_idaapi.plugin_t):
     count = 0
     flags = ida_idaapi.PLUGIN_UNL
     comment = "Interface to IDA Rest API"
     help = "IDA Rest API for basic RE tool interoperability"
-    wanted_name = "IDA Rest API"
+    wanted_name = "IDA Rest API (Terminate)"
     wanted_hotkey = ""
 
     @staticmethod
@@ -115,7 +115,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
         if idarest_plugin_t.count:
             return ida_idaapi.PLUGIN_KEEP
         idarest_plugin_t.count += 1
-        if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::init]\n")
+        if idarest_plugin_t.config['api_verbose']: idc.msg("[idarest_plugin_t::init]\n")
         super(idarest_plugin_t, self).__init__()
         #  self.load_configuration()
 
@@ -145,7 +145,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
 
     def start(self, *args):
         # load_and_run_plugin
-        if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::start]\n")
+        if idarest_plugin_t.config['api_verbose']: idc.msg("[idarest_plugin_t::start]\n")
         if self.worker and self.worker.is_alive():
             if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::start] already running\n")
             return ida_idaapi.PLUGIN_SKIP
@@ -163,20 +163,21 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
         if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::start] timer started\n")
 
         def cleanup():
-            print("**atexit** cleanup")
+            self.register(self.host, self.port, unregister=True)
+            self.log("**atexit** cleanup")
             if worker and worker.is_alive():
-                idc.msg("[idarest_plugin_t::start::cleanup] stopping..\n")
+                self.log("[idarest_plugin_t::start::cleanup] stopping..\n")
                 worker.stop()
-                idc.msg("[idarest_plugin_t::start::cleanup] joining..\n")
+                self.log("[idarest_plugin_t::start::cleanup] joining..\n")
                 worker.join()
-                idc.msg("[idarest_plugin_t::start::cleanup] stopped\n")
+                self.log("[idarest_plugin_t::start::cleanup] stopped\n")
 
             if timer and timer.is_alive() and not timer.stopped():
-                idc.msg("[idarest_plugin_t::start::cleanup] stopping..\n")
+                self.log("[idarest_plugin_t::start::cleanup] stopping..\n")
                 timer.stop()
-                idc.msg("[idarest_plugin_t::start::cleanup] joining..\n")
+                self.log("[idarest_plugin_t::start::cleanup] joining..\n")
                 timer.join()
-                idc.msg("[idarest_plugin_t::start::cleanup] stopped\n")
+                self.log("[idarest_plugin_t::start::cleanup] stopped\n")
 
         print('[idarest_plugin_t::start] registered atexit cleanup')
         atexit.register(cleanup)
@@ -191,7 +192,6 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
         pass
 
     def stop(self):
-        if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::stop]\n")
         if not self.timer or not self.timer.is_alive():
             if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::stop] timer was not running\n")
         else:
@@ -216,12 +216,10 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
 
 
     def term(self):
-        if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::term]\n")
         try:
             self.stop()
         except Exception as e:
-            if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::term] {}\n".format(e))
-            pass
+            if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::term] {}: {}\n".format(e.__class__.__name__, str(e)))
         #  for ctx in self.ctxs:
             #  ida_kernwin.del_hotkey(ctx)
             #
@@ -233,7 +231,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
             url = 'http://{}:{}{}/unregister'.format(idarest_plugin_t.config['master_host'], idarest_plugin_t.config['master_port'], idarest_plugin_t.config['api_prefix'])
         else:
             url = 'http://{}:{}{}/register'.format(idarest_plugin_t.config['master_host'], idarest_plugin_t.config['master_port'], idarest_plugin_t.config['api_prefix'])
-        if idarest_plugin_t.config['api_debug']: idc.msg("[idarest_plugin_t::register] trying to connect to master at {}\n".format(url))
+        if idarest_plugin_t.config['api_verbose']: idc.msg("[idarest_plugin_t::register] trying to connect to master at {}\n".format(url))
         master_plugin = _API_FILE.replace('idarest.py', 'idarest_master.py')
         connect_timeout = 1
         read_timeout = 1
@@ -251,7 +249,7 @@ class idarest_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
                     timeout=(connect_timeout, read_timeout))
             if r.status_code == 200:
                 if r.content:
-                    if idarest_plugin_t.config['api_debug']: idc.msg("[idarest_plugin_t::register] master responded correctly: {}, {}\n".format(url, r.content))
+                    if idarest_plugin_t.config['api_verbose']: idc.msg("[idarest_plugin_t::register] master responded correctly: {}, {}\n".format(url, r.content))
                 else:
                     if idarest_plugin_t.config['api_info']: idc.msg("[idarest_plugin_t::register] master failed to return data: {}, {}\n".format(url, r.content))
                 return
@@ -319,7 +317,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def set_result(uid, value):
-        if idarest_plugin_t.config['api_debug']: idc.msg("[set_result] {}: {}\n".format(uid, value))
+        if idarest_plugin_t.config['api_verbose']: idc.msg("[set_result] {}: {}\n".format(uid, value))
         HTTPRequestHandler.idarest_queue[uid].put(value)
         return uid
 
@@ -354,7 +352,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     "traceback": traceback.format_exc()}
         except:
             value = "timeout"
-        if idarest_plugin_t.config['api_debug']: idc.msg("[get_result] {}: {}\n".format(uid, value))
+        if idarest_plugin_t.config['api_verbose']: idc.msg("[get_result] {}: {}\n".format(uid, value))
         return value
 
     @staticmethod
@@ -491,10 +489,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             for i in itertools.count(start=0):
                 self._write_chunk(response_fmt.format(json.dumps(response)))
 
-                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}".format(response))
+                if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] wrote: {}\n".format(response))
                 data = q.get(timeout=idarest_plugin_t.config['api_queue_result_qget_timeout'])
                 if data is None:
-                    if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None")
+                    if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::_serve_queue] Queue returned None\n")
                     break
                 response = {
                     'code': 200,
@@ -587,14 +585,14 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             it = self._serve_route(args)
             # it = sleeping_generator_test({}, {})
             if issubclass(it.__class__, Exception):
-                response = {'code': 400, 'msg': 'returned exception {}: {}'.format(it.__class__, str(response))}
+                response = {'code': 400, 'msg': 'returned exception {}: {}'.format(it.__class__, str(it))}
                 error = True
-                print('returned exception {}: {}'.format(it.__class__, str(response)))
+                print('returned exception {}: {}'.format(it.__class__, str(it)))
             elif str(type(it)) == "<class 'generator'>":
-                if idarest_plugin_t.config['api_debug']: print("[_serve] Generator!")
+                #  if idarest_plugin_t.config['api_debug']: print("[_serve] Generator!")
                 return self._serve_generator(it)
             elif it.__class__.__name__ == "Queue":
-                if idarest_plugin_t.config['api_debug']: print("[_serve] Queue!")
+                #  if idarest_plugin_t.config['api_debug']: print("[_serve] Queue!")
                 return self._serve_queue(it)
             else:
                 if isinstance(it, dict) and it.get('code', None):
@@ -709,7 +707,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         except HTTPRequestError as e:
             self.send_error(e.code, e.msg)
             return
-        self._serve(args)
+        try:
+            self._serve(args)
+        except ConnectionAbortedError as e:
+            if idarest_plugin_t.config['api_debug']: idc.msg("[HTTPRequestHandler::do_GET] {}: {}\n".format(e.__class__.__name__, str(e)))
 
     @staticmethod
     def delayed_call(f):
@@ -1050,7 +1051,7 @@ class IDARequestHandler(HTTPRequestHandler):
             tinfo.deserialize(idaapi.cvar.idati, tp, fld, None)
             return tinfo
 
-        def my_print_decls(name, flags = PDF_INCL_DEPS | PDF_DEF_FWD):
+        def my_print_decls(name, flags=0):
             names = name if isinstance(name, list) else [name]
             ordinals = []
             for name in names:
@@ -1074,12 +1075,16 @@ class IDARequestHandler(HTTPRequestHandler):
             return result
 
         types = IDARequestHandler.paren_split(args['type'], ',')
+        #  flags = idc.PDF_INCL_DEPS | idc.PDF_DEF_FWD
+        flags = 3
+        if 'flags' in args:
+            flags = int(args['flags'], 0)
         if idarest_plugin_t.config['api_debug']: print("request for type definitions: {}".format(types))
         result = []
         if types:
             for t in set(types):
                 if t != 'void':
-                    et = my_print_decls(t)
+                    et = my_print_decls(t, flags=flags)
                     response = {
                         'name' : t,
                         'msg'  : 'OK',
@@ -1255,7 +1260,7 @@ class IDARequestHandler(HTTPRequestHandler):
                 return IDARequestHandler.error('missing parameter \'cmd\'')
             cmd = args['cmd']
             if idarest_plugin_t.config['api_debug']: idc.msg('cmd: {}\n'.format(cmd))
-            q = Queue()
+            q = Queue(maxsize=1)
             i = EvalInterpreterQueue(superglobals(), q)
             def delayed():
                 i.eval(cmd)
@@ -1339,7 +1344,7 @@ class Timer(threading.Thread):
         self.port = port
 
     def run(self):
-        if idarest_plugin_t.config['api_info']: print("[idarest::Timer::run] started")
+        if idarest_plugin_t.config['api_info']: print("[idarest::Timer::run] started\n")
         while True:
             result = idarest_plugin_t.register(self.host, self.port)
             if self._stop_event.wait(60.0):
@@ -1419,19 +1424,34 @@ def idarest_main(*args):
     def sleeping_queue_test(self, args):
         q = Queue()
         def test():
-            for r in range(10):
+            for r in range(60):
                 q.put(r)
                 time.sleep(1)
         HTTPRequestHandler.delayed_call(test)
         return q
 
+    @static_vars(q=Queue())
+    def tap(self, args):
+        if BorrowStdOut.is_default_stdout(sys.stdout):
+            sys.stdout = BorrowStdOut.IDARestStdOutTee(sys.stdout, BorrowStdOut.IDARestStdOutQueue(tap.q))
+            # sys.stderr = BorrowStdOut.IDARestStdOutTee(sys.stderr, BorrowStdOut.IDARestStdOutQueue(tap.q))
+        else:
+            pass
+            # return IDARequestHandler.error('stdout is already tapped')
+
+
+        return tap.q
+
+
     ir.add_route('sleep', sleeping_generator_test)
     ir.add_route('name_generator', name_generator)
     ir.add_route('names', names)
     ir.add_route('ea', lambda o, *a: idc.here())
-    ir.add_route('echo', lambda o, *a: {'args': a})
+    ir.add_route('echo', lambda o, a: {'args': a})
+    ir.add_route('name', lambda o, a: idc.get_name(eax(a['ea'])))
     ir.add_route('q', queue_test)
     ir.add_route('q2', sleeping_queue_test)
+    ir.add_route('tap', tap)
     ### end example route
 
 
@@ -1446,6 +1466,7 @@ def idarest_main(*args):
 
     ir.add_route('list1', relist_iter)
     ir.add_route('list2', relist_queue)
+    ### end "my stuff"
 
     return ir
 
@@ -1454,7 +1475,7 @@ if not hasattr(idarest_main, 'instance'):
     idarest_main.instance = None
     idarest_main.instances = []
 
-if idarest_plugin_t.config['api_debug']:
+if idarest_plugin_t.config['api_verbose']:
     print("[idarest]: __name__: ", __name__)
     print("[idarest]: __file__: ", __file__)
 
@@ -1475,41 +1496,14 @@ else:
     _load_method = 'unknown'
     print("[idarest]: unknown load method '{}'".format(__name__))
 
-def is_plugin():
-    stk = []                                         
-    raw = []
-    for i in range(len(inspect.stack()) - 1, 0, -1): 
-        s = inspect.stack()[i]
-        s2 = s[0]
-        raw.append((
-            s2.f_code.co_filename,
-            s2.f_lineno,
-            s2.f_code.co_name,
-        ))
-        stk.append('  File "{}", line {}, in {}'.format(
-            s2.f_code.co_filename,
-            s2.f_lineno,
-            s2.f_code.co_name,
-        ))
-
-        if s2.f_code.co_name == "load_plugin":
-            print("\n".join(stk))
-            return True
-
-        #  stk.append(s2.f_code.co_firstlineno)
-        #  pp(inspect.stack()[i])
-        #  stk.append(inspect.stack()[i])            
-    print("\n".join(stk))
-    return False
-
 # find existing instance of idarest (unless we're loading as an ida plugin)
 def get_ir():
     if idarest_plugin_t.config['api_debug']: idc.msg("[get_ir] attempting to find existing idarest instance...\n")
     # check if idarest is loaded as a plugin
     ir = None
-    if idarest_plugin_t.config['api_debug']: idc.msg('[get_ir] sys.modules.__plugins__\n')
+    if idarest_plugin_t.config['api_verbose']: idc.msg('[get_ir] sys.modules.__plugins__\n')
     for k in [x for x in sys.modules if x.startswith('__plugins__')]:
-        if idarest_plugin_t.config['api_debug']: idc.msg('[get_ir]     ' + k + '\n')
+        if idarest_plugin_t.config['api_verbose']: idc.msg('[get_ir]     ' + k + '\n')
     ir = ir or getglobal('sys.modules.__plugins__idarest_plugin.instance', None)
     if ir:
         if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from sys.modules.__plugins__idarest_plugin.instance\n")
@@ -1526,61 +1520,71 @@ def get_ir():
                 # check if idarest is loaded in global context
                 ir = ir or getglobal('idarest_main.instance', None)
                 if ir:
-                    if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from idarest_main.instance (will restart)\n")
+                    if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] got reference to idarest from idarest_main.instance\n") 
                     # else start a new idarest instance
                     if ir and _load_method == "direct":
+                        if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] will (re)start idarest\n")
                         ir.term()
                         ir = None
 
-    if not ir:
-        if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] restarting\n")
-        ir = ir or idarest_main()
+    if not ir or not ir.is_alive():
+        if idarest_plugin_t.config['api_info']: idc.msg("[get_ir] starting\n")
+        ir = idarest_main()
 
     return ir
 
 def get_ir_plugin():
-    return sys.modules['__plugins__idarest_plugin']
+    if '__plugins__idarest_plugin' in sys.modules:
+        return sys.modules['__plugins__idarest_plugin']
+
+def find_plugin(pattern):
+    for name in sys.modules.copy():
+        if name.startswith('__plugins__') and re.match(pattern, name[11:]):
+            yield name[11:]
+
+def get_plugin(name):
+    return sys.modules['__plugins__' + name]
+
+def unload_module(pattern):
+    for x in [x for x in sys.modules.keys() if re.match(pattern, x)]:
+        print("unloading {}".format(x))
+        del sys.modules[x]
+
+def unload_plugin(pattern, reload=False):
+    for name in find_plugin(pattern):
+        l = ida_loader.load_plugin(get_plugin(name).__file__)
+        ida_loader.run_plugin(l, 0)
+        unload_module(pattern)
+        if reload:
+            plugin = get_ir_plugin()
+            if plugin:
+                l = ida_loader.load_plugin(plugin.__file__)
 
 def reload_idarest():
-    l = ida_loader.load_plugin(get_ir_plugin().__file__)
-    ida_load.run_plugin(l, 0)
-    unload('idarest')
-    l = ida_loader.load_plugin(get_ir_plugin().__file__)
-
-    #    import gc
-    #    ir = getglobal('sys.modules.__plugins__idarest_plugin.instance') or getglobal('sys.modules.idarest.instance') or getglobal('idarest_main.instance')
-    #    if ir:
-    #        for o in gc.get_referrers(ir):
-    #            if isinstance(o, dict):
-    #                for k in o.keys():
-    #                    if o[k] == ir:
-    #                        print("deleting key {}".format(k))
-    #                        o.pop(k)
-    #            else:
-    #                for k in dir(o):
-    #                    if getattr(o, k, None) == ir:
-    #                        print("deleting attribute {}".format(k))
-    #                        delattr(o, k)
-    #
-    #    removeglobal('sys.modules.__plugins__idarest_plugin.instance')
-    #    removeglobal('sys.modules.idarest.instance')
-    #    removeglobal('idarest_main.instance')
-    #    unload('idarest')
-    #    unload('__plugins__idarest')
-    #    removeglobal('ir')
-
-#  def cleanup():
-    #  print("**atexit** cleanup2")
-    #  ir.term()
-#  print('registered atexit cleanup2')
-#  atexit.register(cleanup)
+    plugin = get_ir_plugin()
+    if plugin:
+        l = ida_loader.load_plugin(plugin.__file__)
+        ida_loader.run_plugin(l, 0)
+    unload_module('idarest')
+    if plugin:
+        l = ida_loader.load_plugin(plugin.__file__)
+    else:
+        print("idarest was not loaded as a plugin, cannot reload")
 
 def test_eval(cmd):
     ir = getglobal('ir', None)
     if ir:
         ir.term()
-    unload('idarest')
-    _from('idarest.idarest import EvalInterpreter, get_ir')
+    # unload_module('idarest')
+    # _from('idarest.idarest import *')
+    try:
+        ida_idaapi.require('idarest.idarest')
+        ida_idaapi.require('idarest.idarest_mixins')
+        from idarest.idarest import get_ir
+    except ModuleNotFoundError:
+        ida_idaapi.require('idarest')
+        ida_idaapi.require('idarest_mixins')
+        from idarest import get_ir
     setglobal('ir', get_ir())
     e = EvalInterpreter(superglobals())
     r = e.eval(cmd)

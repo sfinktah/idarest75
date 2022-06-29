@@ -1,8 +1,9 @@
-import socket
+import socket, atexit
+from underscore3 import _
 try:
-    from .idarest_mixins import IdaRestConfiguration
+    from .idarest_mixins import IdaRestConfiguration, IdaRestLog
 except:
-    from idarest_mixins import IdaRestConfiguration
+    from idarest_mixins import IdaRestConfiguration, IdaRestLog
 
 #  idarest_master_plugin_t.config['master_debug'] = False
 #  idarest_master_plugin_t.config['master_info'] = False
@@ -28,7 +29,7 @@ except:
         plugin_t = object
         PLUGIN_SKIP = PLUGIN_UNL = PLUGIN_KEEP = 0
 
-class idarest_master_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
+class idarest_master_plugin_t(IdaRestConfiguration, IdaRestLog, ida_idaapi.plugin_t):
     flags = ida_idaapi.PLUGIN_UNL
     comment = "IDA Rest API Master Controller"
     help = "Keeps track of idarest75 clients"
@@ -47,6 +48,27 @@ class idarest_master_plugin_t(IdaRestConfiguration, ida_idaapi.plugin_t):
 
         self.master = idarest_master()
         idarest_master_plugin_t.instance = self
+
+        #  def cleanup():
+            # TODO: make master able to clean up! ffs
+            #  self.log("**master.atexit** cleanup")
+            #  if worker and worker.is_alive():
+                #  self.log("[idarest_master_plugin_t::start::cleanup] stopping..\n")
+                #  worker.stop()
+                #  self.log("[idarest_master_plugin_t::start::cleanup] joining..\n")
+                #  worker.join()
+                #  self.log("[idarest_master_plugin_t::start::cleanup] stopped\n")
+#  
+            #  if timer and timer.is_alive() and not timer.stopped():
+                #  self.log("[idarest_master_plugin_t::start::cleanup] stopping..\n")
+                #  timer.stop()
+                #  self.log("[idarest_master_plugin_t::start::cleanup] joining..\n")
+                #  timer.join()
+                #  self.log("[idarest_master_plugin_t::start::cleanup] stopped\n")
+
+        #  print('[idarest_master_plugin_t::start] registered atexit cleanup')
+
+        #  atexit.register(cleanup)
         return idaapi.PLUGIN_KEEP
 
     def run(*args):
@@ -133,11 +155,11 @@ def idarest_master():
                     if idarest_master_plugin_t.config['master_debug']: print("alive: {}".format(start - host['alive']))
                     if start - host['alive'] < 90:
                         results[host['idb']] = 'http://{}:{}{}/'.format(host['host'], host['port'], idarest_master_plugin_t.config['api_prefix'])
-                    else:
-                        results[host['idb']] = start - host['alive']
+                    #  else:
+                        #  results[host['idb']] = start - host['alive']
                 return results
 
-            for k, host in hosts.items():
+            for k, host in hosts.copy().items():
                 start = time.time()
                 url = 'http://{}:{}{}/echo'.format(host['host'], host['port'], idarest_master_plugin_t.config['api_prefix'])
                 try:
@@ -159,6 +181,29 @@ def idarest_master():
 
 
         def show(self, args):
+            return self.get_json(self.hosts, {'ping': time.time()}, readonly=True)
+
+        def fail(self, args):
+            if 'idb' not in args:
+                raise HTTPRequestError("idb param not specified", 400)
+            found = _.find(self.hosts, lambda x, *a: x['idb'] == args['idb'])
+            print("[fail] found:{}, type(found):{}".format(found, type(found)))
+            keys = [x for x, y in self.hosts.items() if y == found]
+            if keys:
+                for key in keys:
+                    if idarest_master_plugin_t.config['master_debug']: print("[idarest_master::Handler::unregister] removing existing host {}".format(key))
+                    value = self.hosts.pop(key)
+            else:
+                value = dict({
+                    'host': args['host'],
+                    'port': args['port'],
+                    'error': 'not registered',
+                })
+                    
+
+            return value
+
+
             return self.get_json(self.hosts, {'ping': time.time()}, readonly=True)
 
         def _extract_query_map(self):
@@ -193,6 +238,13 @@ def idarest_master():
                 message = self.unregister(args)
             elif path == 'show':
                 message = self.show(args)
+            elif path == 'fail':
+                message = self.fail(args)
+            elif path == 'term':
+                globals()['instance'].term()
+            elif path == 'restart':
+                # TODO: actually restart
+                globals()['instance'].term()
             else:
                 self.send_error(400, "unknown route: " + path)
                 return

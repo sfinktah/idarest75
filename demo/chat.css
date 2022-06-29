@@ -16,7 +16,7 @@
 
 body {
   background: white;
-  margin: 10px;
+  /* margin: 10px; */
 }
 
 body,
@@ -37,13 +37,17 @@ td {
 }
 
 #body {
-  position: absolute;
+  /* position: absolute; */
+  width: 100%;
   bottom: 10px;
   left: 10px;
 }
 
 #input {
   margin-top: 0.5em;
+    position: absolute;
+    bottom: 20px;
+    left: 10px;
 }
 
 #inbox .message {
@@ -55,6 +59,33 @@ td {
   z-index: 99;
 }
 
+div#inbox > div.message > div.message-inner {
+    border: 1px dashed darkred;
+    overflow: scroll;
+    max-height: calc(100vh - 64px);
+}
+
+div#inbox > div.message > div.message-inner {
+  overflow-y: scroll;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y proximity;
+}
+
+div#inbox > div.message > div.message-inner > div > div:last-child {
+  scroll-snap-align: end;
+}
+
+div#inbox > div.message > div.message-inner > div > div {
+  /*
+   * background: lightgray;
+   * height: 3rem;
+   * font-size: 1.5rem;
+   */
+}
+div#inbox > div.message > div.message-inner > div > div:nth-child(2n) {
+  /* background: gray; */
+}
+
 div#inbox > div.message > .idb {
     display: inline-block;
     border-radius: 8px;
@@ -63,9 +94,11 @@ div#inbox > div.message > .idb {
     padding: 3px 5px;
 }
 
-div#inbox > div.message pre {
-    margin-top: 0.3em;
+div#inbox > div.message > div.message-inner pre {
+    margin-top: 0;
+    margin-bottom: 0;
     margin-left: 5px;
+    overflow: visible;
 }
 
 .response.stderr {
@@ -78,5 +111,9 @@ div#inbox > div.message pre {
 
 
 .response.buffer {
+    color: green;
+}
+
+pre.query {
     color: green;
 }
